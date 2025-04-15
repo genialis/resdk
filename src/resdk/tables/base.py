@@ -371,6 +371,34 @@ class BaseTables(abc.ABC):
         )
 
     def _get_orange_data(self) -> pd.DataFrame:
+        def map_and_filter_samples(
+            df: pd.DataFrame, column_name: str, mapping: dict[str, int]
+        ) -> pd.DataFrame:
+            """Map values from a predefined column to a new ``sample_id`` column.
+
+            The original column is dropped from the returned DataFrame.
+
+            Samples with no corresponding entry in ``mapping`` are omitted because they are
+            not present in the collection or do not have a data object with the required
+            process type.
+            """
+            mask = df[column_name].isin(mapping)
+            discarded = df.loc[~mask]
+
+            if not discarded.empty:
+                na_samples = discarded[column_name].unique().tolist()
+                warnings.warn(
+                    f"The following samples in the one-to-one metadata table are not present in "
+                    f"the collection or do not have a data object with a required process type."
+                    f" These samples will be omitted from the output: {na_samples}",
+                    Warning,
+                )
+
+            df = df.loc[mask].copy()
+            df["sample_id"] = df[column_name].map(mapping)
+            df = df.drop(columns=[column_name])
+            return df
+
         try:
             orange_meta = self._get_orange_object()
         except LookupError:
@@ -400,30 +428,25 @@ class BaseTables(abc.ABC):
             df = df.rename(columns={"Sample ID": "sample_id"})
         elif "mS#Sample ID" in df.columns:
             df = df.rename(columns={"mS#Sample ID": "sample_id"})
-        elif "Sample slug" in df.columns:
-            mapping = {s.slug: s.id for s in self._samples}
-            df["sample_id"] = [mapping[value] for value in df["Sample slug"]]
-            df = df.drop(columns=["Sample slug"])
-        elif "mS#Sample slug" in df.columns:
-            mapping = {s.slug: s.id for s in self._samples}
-            df["sample_id"] = [mapping[value] for value in df["mS#Sample slug"]]
-            df = df.drop(columns=["mS#Sample slug"])
-        elif "Sample name" in df.columns or "Sample name" in df.columns:
-            mapping = {s.name: s.id for s in self._samples}
-            if len(mapping) != len(self._samples):
-                raise ValueError(
-                    "Duplicate sample names. Cannot map orange table data to other metadata"
+        else:
+            columns_map = {
+                "Sample slug": "slug",
+                "mS#Sample slug": "slug",
+                "Sample name": "name",
+                "mS#Sample name": "name",
+            }
+            for column_name, attr in columns_map.items():
+                if column_name not in df.columns:
+                    continue
+                mapping = {getattr(s, attr): s.id for s in self._samples}
+                if attr == "name" and len(mapping) != len(self._samples):
+                    raise ValueError(
+                        "Duplicate sample names. Cannot map orange table data to other metadata"
+                    )
+                df = map_and_filter_samples(
+                    df=df, column_name=column_name, mapping=mapping
                 )
-            df["sample_id"] = [mapping[value] for value in df["Sample name"]]
-            df = df.drop(columns=["Sample name"])
-        elif "mS#Sample name" in df.columns:
-            mapping = {s.name: s.id for s in self._samples}
-            if len(mapping) != len(self._samples):
-                raise ValueError(
-                    "Duplicate sample names. Cannot map orange table data to other metadata"
-                )
-            df["sample_id"] = [mapping[value] for value in df["mS#Sample name"]]
-            df = df.drop(columns=["mS#Sample name"])
+                break
 
         return df.set_index("sample_id")
 
