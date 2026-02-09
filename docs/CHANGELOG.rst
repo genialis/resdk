@@ -16,6 +16,8 @@ Fixed
 -----
 - Fix a bug that prevented the downloading and renaming of
   a directory from a data object
+- Fix anonymous user login so it does not require interactive 
+  credential input
 
 
 ===================

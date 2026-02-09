@@ -292,8 +292,13 @@ class Resolwe:
         If only username is given prompt the user for password via shell.
         If username is not given, prompt for interactive login.
         """
-        if username is not None and password is None:
+        if username is None:
+            self._login(interactive=False)
+            return
+
+        if password is None:
             password = getpass.getpass("Password: ")
+
         self._login(username=username, password=password, interactive=True)
 
     def get_query_by_resource(self, resource: type[BaseResource]) -> ResolweQuery:
