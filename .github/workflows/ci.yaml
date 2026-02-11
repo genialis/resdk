@@ -63,7 +63,7 @@ jobs:
         run: ${{ env.PYTHON }} -m pip install --user build
 
       - name: Build a binary wheel and a source tarball
-        run: ${{ env.PYTHON }} -m build --sdist --wheel --outdir dist/ .
+        run: uv build
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v1
