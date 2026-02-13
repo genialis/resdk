@@ -351,7 +351,7 @@ class BaseTables(abc.ABC):
             for partition in relation.partitions:
                 value = ""
                 if partition["label"] and partition["position"]:
-                    value = f'{partition["label"]} / {partition["position"]}'
+                    value = f"{partition['label']} / {partition['position']}"
                 elif partition["label"]:
                     value = partition["label"]
                 elif partition["position"]:
@@ -371,6 +371,19 @@ class BaseTables(abc.ABC):
         )
 
     def _get_orange_data(self) -> pd.DataFrame:
+        def map_and_filter_samples(
+            df: pd.DataFrame, column_name: str, mapping: dict
+        ) -> pd.DataFrame:
+            """Map a predefined column name to a column named ``sample_id``, drop the original
+            and return the constructed DataFrame.
+            Omit samples for which mapping is not defined. These samples do not
+            have any data objects with the defined process type.
+            """
+            df = df[df[column_name].isin(mapping.keys())]
+            df["sample_id"] = df[column_name].map(mapping)
+            df = df.drop(columns=[column_name])
+            return df
+
         try:
             orange_meta = self._get_orange_object()
         except LookupError:
@@ -402,29 +415,32 @@ class BaseTables(abc.ABC):
             df = df.rename(columns={"mS#Sample ID": "sample_id"})
         elif "Sample slug" in df.columns:
             mapping = {s.slug: s.id for s in self._samples}
-            df["sample_id"] = [mapping[value] for value in df["Sample slug"]]
-            df = df.drop(columns=["Sample slug"])
+            df = map_and_filter_samples(
+                df=df, column_name="Sample slug", mapping=mapping
+            )
         elif "mS#Sample slug" in df.columns:
             mapping = {s.slug: s.id for s in self._samples}
-            df["sample_id"] = [mapping[value] for value in df["mS#Sample slug"]]
-            df = df.drop(columns=["mS#Sample slug"])
+            df = map_and_filter_samples(
+                df=df, column_name="mS#Sample slug", mapping=mapping
+            )
         elif "Sample name" in df.columns or "Sample name" in df.columns:
             mapping = {s.name: s.id for s in self._samples}
             if len(mapping) != len(self._samples):
                 raise ValueError(
                     "Duplicate sample names. Cannot map orange table data to other metadata"
                 )
-            df["sample_id"] = [mapping[value] for value in df["Sample name"]]
-            df = df.drop(columns=["Sample name"])
+            df = map_and_filter_samples(
+                df=df, column_name="Sample name", mapping=mapping
+            )
         elif "mS#Sample name" in df.columns:
             mapping = {s.name: s.id for s in self._samples}
             if len(mapping) != len(self._samples):
                 raise ValueError(
                     "Duplicate sample names. Cannot map orange table data to other metadata"
                 )
-            df["sample_id"] = [mapping[value] for value in df["mS#Sample name"]]
-            df = df.drop(columns=["mS#Sample name"])
-
+            df = map_and_filter_samples(
+                df=df, column_name="mS#Sample name", mapping=mapping
+            )
         return df.set_index("sample_id")
 
     def _download_metadata(self) -> pd.DataFrame:
