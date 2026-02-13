@@ -230,8 +230,8 @@ class ResolweQuery:
             resolwe=self.resolwe, **data, initial_data_source=DataSource.SERVER
         )
 
-    def _fetch(self):
-        """Make request to the server and populate cache."""
+    def _fetch_data(self):
+        """Fetch data from the server."""
         if self._cache is not None:
             # Already fetched.
             return
@@ -248,12 +248,17 @@ class ResolweQuery:
 
         # Extract data from paginated response
         if isinstance(items, dict) and "results" in items:
-            self._count = items["count"]
+            count = items["count"]
             items = items["results"]
         # Store count when list of objects is received without limit.
         if isinstance(items, list) and self._limit is None:
-            self._count = len(items)
+            count = len(items)
+        return items, count
 
+    def _fetch(self):
+        """Make request to the server and populate cache."""
+        items, count = self._fetch_data()
+        self._count = count
         self._cache = [self._populate_resource(data) for data in items]
 
     def clear_cache(self):
@@ -275,6 +280,17 @@ class ResolweQuery:
 
         remaining = self._count - self._offset
         return max(0, min(self._limit, remaining))
+
+    def values(self, fields: list[str]) -> list[dict]:
+        """Return only values for the given fields.
+
+        Used to reduce the data transferred from the server.
+
+        TODO: Should we support pagination? How do we support it?
+        """
+        field_query = self.filter(fields=fields)
+        items, _count = field_query._fetch_data()
+        return items
 
     def get(self, *args, **kwargs):
         """Get object that matches given parameters.
