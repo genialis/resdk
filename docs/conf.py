@@ -1,4 +1,4 @@
-import sphinx_rtd_theme
+import os
 
 try:
     from importlib.metadata import version as get_version
@@ -45,7 +45,28 @@ todo_include_todos = False
 # -- Options for HTML output ----------------------------------------------
 
 # The theme to use for HTML and HTML Help pages.
-html_theme = 'sphinx_rtd_theme'
+html_theme = "sphinx_nefertiti"
+
+DOCS_HOST = os.environ.get("DOCS_HOST", "docs.genialis.com")
+GOOGLE_ANALYTICS_ID = os.environ.get("GOOGLE_ANALYTICS_ID", "")
+
+html_theme_options = {
+    "project_short": project,
+    "logo_url": f"https://{DOCS_HOST}/",
+    "google_analytics_id": GOOGLE_ANALYTICS_ID,
+    "style_header_neutral": True,
+    "style": "yellow",
+
+    "header_links": [
+        {
+            "text": project,
+            "link": f"https://{DOCS_HOST}/resdk/index.html",
+        },
+    ],
+}
+
+# Paths that contain custom static files (such as style sheets)
+html_static_path = ['_static']
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {'python': ('https://docs.python.org/3', None)}
