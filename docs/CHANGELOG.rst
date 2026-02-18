@@ -4,6 +4,15 @@ Change Log
 
 All notable changes to this project are documented in this file.
 
+==========
+Unreleased
+==========
+
+Fixed
+-----
+- Revert anonymous user login fix to restore interactive login behavior
+
+
 ===================
 22.2.2 - 2026-02-10
 ===================
@@ -16,7 +25,7 @@ Fixed
 -----
 - Fix a bug that prevented the downloading and renaming of
   a directory from a data object
-- Fix anonymous user login so it does not require interactive 
+- Fix anonymous user login so it does not require interactive
   credential input
 
 
