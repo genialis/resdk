@@ -4,6 +4,16 @@ Change Log
 
 All notable changes to this project are documented in this file.
 
+==========
+Unreleased
+==========
+
+Fixed
+-----
+- Raise an error if a user calls the download method
+  on a data object and inputs a non-existing file or field name
+
+
 ===================
 22.2.3 - 2026-02-18
 ===================

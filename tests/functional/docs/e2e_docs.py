@@ -165,6 +165,8 @@ class TestStart(BaseResdkDocsFunctionalTest):
             replace_lines=[
                 (4, "res = resdk.Resolwe(url='{}')\n".format(URL)),
                 (5, "res.login('{}', '{}')\n".format(USER_EMAIL, USER_PASSWORD)),
+                # Skip download, since data objects have not finished processing
+                (49, "\n"),
             ],
         )
 
@@ -233,6 +235,10 @@ class TestTutorialCreate(BaseResdkDocsFunctionalTest):
                 # is replaced with an empty line. There is now way to perform
                 # download if data objects are still processing and/or have not
                 # produced any stdout.txt. So just write an empty line:
+                (9, "\n"),
+                (10, "\n"),
+                (11, "\n"),
+                (12, "\n"),
                 (107, "\n"),
             ],
         )

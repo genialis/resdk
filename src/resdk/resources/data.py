@@ -284,6 +284,12 @@ class Data(BaseResolweResource):
         file_names = self.files(file_name, field_name)
         files = ["{}/{}".format(self.id, fname) for fname in file_names]
 
+        if not files:
+            raise ValueError(
+                f"Data object contains no files with "
+                f"{'file name: ' + repr(file_name) if file_name else 'field name: ' + repr(field_name)}."
+            )
+
         self.resolwe._download_files(
             files=files, download_dir=download_dir, show_progress=show_progress
         )
