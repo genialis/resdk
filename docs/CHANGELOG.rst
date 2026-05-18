@@ -8,6 +8,13 @@ All notable changes to this project are documented in this file.
 Unreleased
 ==========
 
+Added
+-----
+- Add ``estimated_fragment_count_raw`` and ``estimated_fragment_count_trimmed``
+  columns to the ``QCTables`` ``general_fastq`` output, reporting the number of
+  sequenced fragments (read pairs for paired-end and reads for single-end
+  libraries)
+
 Fixed
 -----
 - Raise an error if a user calls the download method

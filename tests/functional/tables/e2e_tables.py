@@ -37,10 +37,13 @@ class TestTables(BaseResdkFunctionalTest):
         self.assertIn("general.species", self.ct.meta.columns)
 
     def test_qc(self):
-        self.assertEqual(self.ct.qc.shape, (6, 22))
+        self.assertEqual(self.ct.qc.shape, (6, 24))
         self.assertIn(146756, self.ct.qc.index)
         self.assertIn("total_read_count_raw", self.ct.qc.columns)
         self.assertEqual(int(self.ct.qc.loc[146756, "total_read_count_raw"]), 46910187)
+        self.assertEqual(
+            int(self.ct.qc.loc[146756, "estimated_fragment_count_raw"]), 46910187
+        )
 
     def test_rc(self):
         self.assertEqual(self.ct.rc.shape, (4, 62710))

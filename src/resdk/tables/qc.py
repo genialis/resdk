@@ -13,6 +13,7 @@ QCTables
 """
 
 import re
+import warnings
 from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
@@ -64,8 +65,7 @@ MQC_CLEANED_SFXS = [
 
 def _filter_and_rename_columns(df, column_map):
     """Filter, apply a scaling factor and rename columns based on provided specifications."""
-    selected_columns = []
-    rename_map = {}
+    result = pd.DataFrame(index=df.index)
 
     for col in column_map:
         names = col.get("name", [])
@@ -77,16 +77,12 @@ def _filter_and_rename_columns(df, column_map):
 
         for name in names:
             if name in df.columns:
-                selected_columns.append(name)
-                rename_map[name] = slug
                 # Some column values are given a specific format (e.g. millions)
                 # and need to be scaled on a common scale
-                df[name] = df[name] * scaling_factor.get(name, 1)
+                result[slug] = df[name] * scaling_factor.get(name, 1)
                 break
 
-    df = df[selected_columns].rename(columns=rename_map)
-
-    return df
+    return result
 
 
 def _aggregate_df(df, column_map, prefix=None):
@@ -119,7 +115,95 @@ def _clean_sample_name(
     return sfx_pattern.sub("", filename)
 
 
-def general_multiqc_parser(file_object, name, column_map):
+def _file_name(entry) -> str:
+    """Return the file name from a single Resolwe file field entry."""
+    if isinstance(entry, dict):
+        return entry.get("file", "")
+    return str(entry)
+
+
+def _mate_file_groups(reads_output: dict) -> Optional[list[list[str]]]:
+    """Group cleaned FASTQ file names by read mate from a reads object's output.
+
+    The reads object merges the per-lane input files into a single FASTQ file
+    per mate, exposed on its output regardless of the process that produced it:
+    ``fastq`` (and ``fastq2`` for paired-end libraries). The returned value
+    contains one list of cleaned MultiQC sample names per read mate: two lists
+    for paired-end libraries and a single list for single-end libraries.
+
+    Returns ``None`` if the output does not describe FASTQ files.
+    """
+    if "fastq" in reads_output and "fastq2" in reads_output:
+        mate_keys = ["fastq", "fastq2"]
+    elif "fastq" in reads_output:
+        mate_keys = ["fastq"]
+    else:
+        return None
+
+    return [
+        [
+            _clean_sample_name(Path(_file_name(entry)).name)
+            for entry in (reads_output.get(key) or [])
+        ]
+        for key in mate_keys
+    ]
+
+
+def _sum_mate_read_counts(df, fragment_columns, fastq_names_per_mate, name):
+    """Sum the per-lane read counts within each read mate onto a single row.
+
+    The fragment-count columns hold the FastQC total sequences per FASTQ file.
+    For each read mate (R1/R2), the matching MultiQC rows are summed across
+    sequencing lanes and the total is written to a single row. The downstream
+    mean aggregation (see ``_aggregate_df`` and the ``mean`` agg_func in
+    ``qc_mappings``) then yields the sequenced fragment count: read pairs for
+    paired-end libraries or reads for single-end libraries.
+    """
+    df = df.copy()
+
+    if fastq_names_per_mate is None:
+        warnings.warn(
+            "Could not resolve the FASTQ file names from the reads object "
+            "that was used as MultiQC input for "
+            f"sample {name}; fragment counts are left empty.",
+            UserWarning,
+        )
+        df.loc[:, fragment_columns] = pd.NA
+        return df
+
+    # MultiQC renders FastQC row labels in general stats table as "<sample_name> | <fastq_name>";
+    # the part after the "|" can be matched to reads object file name outputs. Only labels with
+    # exactly one "|" carry a FASTQ name; any other label does not and is ignored.
+    mqc_fastqc_row_labels = df.index.map(
+        lambda x: str(x).split("|")[1].strip() if str(x).count("|") == 1 else pd.NA
+    )
+    for fragment_col in fragment_columns:
+        per_mate_sums = {}
+
+        for mate_fastq_names in fastq_names_per_mate:
+            matching_rows = (
+                mqc_fastqc_row_labels.isin(mate_fastq_names) & df[fragment_col].notna()
+            )
+
+            if not matching_rows.any():
+                continue
+
+            # The first MultiQC row label is used as the index
+            placeholder_index = df.index[matching_rows][0]
+
+            # Sum across lanes values per mate
+            per_mate_sums[placeholder_index] = df.loc[matching_rows, fragment_col].sum()
+
+        # Wipe original values (total read counts - see qc_mappings)
+        df[fragment_col] = pd.NA
+
+        for placeholder_index, per_mate_sum in per_mate_sums.items():
+            df.loc[placeholder_index, fragment_col] = per_mate_sum
+
+    return df
+
+
+def general_multiqc_parser(file_object, name, column_map, fastq_names_per_mate=None):
     """General parser for MultiQC files.
 
     If the column_map argument is not specified the function will retain the original column names
@@ -137,6 +221,17 @@ def general_multiqc_parser(file_object, name, column_map):
 
     if df.empty:
         return pd.Series(name=name)
+
+    # These columns are specified to be mapped from actual read counts.
+    # The values are replaced with per mate sums in _sum_mate_read_counts.
+    fragment_metrics = [
+        "estimated_fragment_count_raw",
+        "estimated_fragment_count_trimmed",
+    ]
+    fragment_columns = [col for col in fragment_metrics if col in df.columns]
+
+    if fragment_columns:
+        df = _sum_mate_read_counts(df, fragment_columns, fastq_names_per_mate, name)
 
     series = _aggregate_df(df=df, column_map=column_map)
 
@@ -257,6 +352,11 @@ class QCTables(BaseTables):
     """
 
     process_type = "data:multiqc:"
+
+    # Fetch the MultiQC input in addition to the base fields so the origin
+    # reads object (and its read-mate layout) can be resolved for fragment
+    # count reporting.
+    DATA_FIELDS = BaseTables.DATA_FIELDS + ["input"]
 
     # Data types:
     # The properties are invoked dynamically based on the data type name.
@@ -451,29 +551,91 @@ class QCTables(BaseTables):
             set(group for data in self.DATA_TYPES.values() for group in data["groups"])
         )
 
+    @lru_cache()
+    def _mate_fastq_groups(self) -> dict[int, Optional[list[list[str]]]]:
+        """Map each sample id to its read-mate FASTQ file grouping.
+
+        The grouping is derived from the reads (FASTQ) object used as input to
+        the sample's MultiQC data object. For each sample the oldest such reads
+        object is used, i.e. the uploaded reads rather than a downstream (e.g.
+        trimmed) object.
+
+        The reads objects for all samples are resolved in a single query so
+        that no per-sample API request is issued from within the async
+        download coroutines. Each value is one list of cleaned MultiQC sample
+        names per read mate (see :func:`_mate_file_groups`), or ``None`` if the
+        origin reads object cannot be resolved.
+        """
+        sample_to_input_ids = {}
+        all_input_ids = set()
+        for data_obj in self._data:
+            input_ids = data_obj.input.get("data") or []
+            if input_ids:
+                sample_to_input_ids[data_obj.sample.id] = input_ids
+                all_input_ids.update(input_ids)
+
+        if not all_input_ids:
+            return {}
+
+        reads_output = {
+            reads.id: reads.output
+            for reads in self.resolwe.data.filter(
+                id__in=list(all_input_ids),
+                type="data:reads:fastq:",
+                fields=["id", "output"],
+            ).iterate()
+        }
+
+        mate_groups = {}
+        for sample_id, input_ids in sample_to_input_ids.items():
+            # Use the oldest reads object, i.e. the one with the smallest id.
+            candidate_ids = sorted(id_ for id_ in input_ids if id_ in reads_output)
+            mate_groups[sample_id] = (
+                _mate_file_groups(reads_output[candidate_ids[0]])
+                if candidate_ids
+                else None
+            )
+
+        return mate_groups
+
+    async def _download_data(self, data_type: str) -> pd.DataFrame:
+        """Download data, resolving the FASTQ mate-group map up front.
+
+        Resolving the reads objects requires a blocking API request. Doing it
+        before delegating to the async download keeps it out of the per-file
+        coroutines, where it would block the asyncio event loop and serialize
+        the otherwise parallel downloads.
+        """
+        if data_type == self.GENERAL_FASTQ:
+            self._mate_fastq_groups()
+
+        return await super()._download_data(data_type)
+
     def _parse_file(self, file_obj, sample_id, data_type):
         """Parse file object and return one DataFrame line."""
+        if data_type not in self.DATA_TYPES:
+            raise ValueError(f"Unknown data type: {data_type}")
+
+        sample = next((s for s in self._samples if s.id == sample_id), None)
+
         if data_type == self.MACS_PREPEAK:
-            case_sample = next(
-                (sample for sample in self._samples if sample.id == sample_id), None
-            )
-            sample_name = _clean_sample_name(case_sample.name)
             return self.DATA_TYPES[data_type]["parser"](
                 file_object=file_obj,
                 name=sample_id,
                 column_map=self.DATA_TYPES[data_type]["column_map"],
-                sample_name=sample_name,
+                sample_name=_clean_sample_name(sample.name),
             )
-        else:
-            if data_type in self.DATA_TYPES:
-                parser_func = self.DATA_TYPES[data_type]["parser"]
-                return parser_func(
-                    file_object=file_obj,
-                    name=sample_id,
-                    column_map=self.DATA_TYPES[data_type]["column_map"],
-                )
-            else:
-                raise ValueError(f"Unknown data type: {data_type}")
+
+        fastq_names_per_mate = None
+        if data_type == self.GENERAL_FASTQ:
+            fastq_names_per_mate = self._mate_fastq_groups().get(sample_id)
+
+        return self.DATA_TYPES[data_type]["parser"](
+            file_object=file_obj,
+            name=sample_id,
+            column_map=self.DATA_TYPES[data_type]["column_map"],
+            fastq_names_per_mate=fastq_names_per_mate,
+        )
 
     def _get_data_uri(self, data: Data, data_type: str) -> str:
         """Get the file path based on data type."""

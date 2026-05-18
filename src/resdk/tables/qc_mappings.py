@@ -54,6 +54,26 @@ GENERAL_FASTQ_MAP = [
     },
     {
         "name": [
+            "FastQC (raw)_mqc-generalstats-fastqc_raw-total_sequences",
+            "fastqc_raw-total_sequences",
+        ],
+        "slug": "estimated_fragment_count_raw",
+        "type": "Int64",
+        "agg_func": "mean",
+        "scaling_factor": {"fastqc_raw-total_sequences": 1e6},
+    },
+    {
+        "name": [
+            "FastQC (trimmed)_mqc-generalstats-fastqc_trimmed-total_sequences",
+            "fastqc_trimmed-total_sequences",
+        ],
+        "slug": "estimated_fragment_count_trimmed",
+        "type": "Int64",
+        "agg_func": "mean",
+        "scaling_factor": {"fastqc_trimmed-total_sequences": 1e6},
+    },
+    {
+        "name": [
             "FastQC (raw)_mqc-generalstats-fastqc_raw-percent_gc",
             "fastqc_raw-percent_gc",
         ],

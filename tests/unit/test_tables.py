@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from io import StringIO
 from time import sleep, time
 
 import pandas as pd
@@ -9,6 +10,7 @@ from pandas.testing import assert_frame_equal
 
 from resdk.resources import AnnotationField, AnnotationValue, Sample
 from resdk.tables import RNATables
+from resdk.tables.qc import _mate_file_groups, general_multiqc_parser
 
 from .utils import server_resource
 
@@ -455,3 +457,69 @@ class TestTables(unittest.TestCase):
             feature_id__in=["ENSG001", "ENSG002", "ENSG003"],
         )
         self.assertDictEqual(mapping, self.gene_map)
+
+
+class TestMateFileGroups(unittest.TestCase):
+    def test_paired_end(self):
+        # The reads object merges lanes into one file per mate on its output.
+        reads_output = {
+            "fastq": [{"file": "sampleA_R1.fastq.gz"}],
+            "fastq2": [{"file": "sampleA_R2.fastq.gz"}],
+        }
+        self.assertEqual(
+            _mate_file_groups(reads_output),
+            [["sampleA_R1"], ["sampleA_R2"]],
+        )
+
+    def test_single_end(self):
+        reads_output = {"fastq": [{"file": "sampleB.fastq.gz"}]}
+        self.assertEqual(
+            _mate_file_groups(reads_output),
+            [["sampleB"]],
+        )
+
+
+class TestFragmentCounts(unittest.TestCase):
+    # ``fastqc_raw-total_sequences`` is reported in millions and scaled by 1e6
+    # by GENERAL_FASTQ_MAP, so a value of 10 corresponds to 10_000_000 reads.
+    RAW_COLUMN = "fastqc_raw-total_sequences"
+
+    def _parse(self, rows, fastq_names_per_mate):
+        from resdk.tables.qc_mappings import GENERAL_FASTQ_MAP
+
+        lines = [f"Sample\t{self.RAW_COLUMN}"]
+        lines += [f"{name}\t{value}" for name, value in rows]
+        return general_multiqc_parser(
+            file_object=StringIO("\n".join(lines)),
+            name=123,
+            column_map=GENERAL_FASTQ_MAP,
+            fastq_names_per_mate=fastq_names_per_mate,
+        )
+
+    def test_paired_end_sums_per_mate(self):
+        # MultiQC labels rows as "<sample name> | <mate name>"; only the part
+        # after the "|" is matched to the reads object output file names.
+        series = self._parse(
+            rows=[
+                ("sampleA | sampleA_L001_R1", 10),
+                ("sampleA | sampleA_L002_R1", 5),
+                ("sampleA | sampleA_L001_R2", 10),
+                ("sampleA | sampleA_L002_R2", 5),
+            ],
+            fastq_names_per_mate=[
+                ["sampleA_L001_R1", "sampleA_L002_R1"],
+                ["sampleA_L001_R2", "sampleA_L002_R2"],
+            ],
+        )
+        # Per-mate totals are 15M each; their mean is the fragment (pair) count.
+        self.assertEqual(series["estimated_fragment_count_raw"], 15_000_000)
+
+    def test_single_end_sums_all_lanes(self):
+        series = self._parse(
+            rows=[
+                ("sampleB | sampleB_L001", 8),
+                ("sampleB | sampleB_L002", 2),
+            ],
+            fastq_names_per_mate=[["sampleB_L001", "sampleB_L002"]],
+        )
+        self.assertEqual(series["estimated_fragment_count_raw"], 10_000_000)
