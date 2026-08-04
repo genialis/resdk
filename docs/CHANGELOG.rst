@@ -14,16 +14,24 @@ Added
   columns to the ``QCTables`` ``general_fastq`` output, reporting the number of
   sequenced fragments (read pairs for paired-end and reads for single-end
   libraries)
+- Add the ``custom_asset_name`` argument to the ``download`` method of ``Data``
+  objects, which saves the downloaded file or directory under the given name.
+  It can only be used when a single asset is downloaded
 
 Fixed
 -----
 - Raise an error if a user calls the download method
   on a data object and inputs a non-existing file or field name
+
 Changed
------
+-------
 - Change the parsing logic for the one-to-one metadata table
-  in ``BaseTables`` class so it does not fail when the table 
+  in ``BaseTables`` class so it does not fail when the table
   index does not reflect the state of samples in the collection
+- Deprecate the ``download_and_rename`` method of ``Data`` objects in favor of
+  ``download`` with the ``custom_asset_name`` argument. The method now
+  delegates to ``download``, so a file is written under the custom name
+  directly instead of being renamed afterwards
 
 
 ===================

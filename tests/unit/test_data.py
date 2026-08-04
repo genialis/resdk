@@ -2,6 +2,9 @@
 Unit tests for resdk/resources/data.py file.
 """
 
+import os
+import shutil
+import tempfile
 import unittest
 
 from mock import MagicMock, patch
@@ -204,25 +207,6 @@ class TestData(unittest.TestCase):
             show_progress=True,
         )
 
-        data_mock.reset_mock()
-        data_mock.files.return_value = ["file1.txt"]
-        with patch("os.rename") as mock_rename:
-            Data.download_and_rename(
-                data_mock,
-                custom_asset_name="text_file1.txt",
-                field_name="txt",
-                download_dir="/some/path/",
-            )
-
-            data_mock.download.assert_called_once_with(
-                file_name=None,
-                field_name="txt",
-                download_dir="/some/path/",
-                return_dir_names=True,
-            )
-
-            mock_rename.assert_called_once()
-
     @patch("resdk.resolwe.Resolwe")
     @patch("resdk.resources.data.urljoin")
     @patch("resdk.resources.data.Data", spec=True)
@@ -255,6 +239,95 @@ class TestData(unittest.TestCase):
         out = Data.stdout(data_mock)
 
         self.assertEqual(response.raise_for_status.call_count, 1)
+
+
+class TestDataDownloadCustomAssetName(unittest.TestCase):
+    def data_with_assets(self, file_names, dir_names=()):
+        """Data object whose files and directories are already known."""
+        data = server_resource(Data, resolwe=MagicMock(), id=123)
+        data.files = MagicMock(return_value=list(file_names))
+        data._files_dirs = MagicMock(return_value=list(dir_names))
+        return data
+
+    def test_file_is_saved_under_custom_name(self):
+        data = self.data_with_assets(["filtered_variants.vcf.gz"])
+
+        asset_names = data.download(
+            field_name="vcf",
+            download_dir="/some/path",
+            custom_asset_name="sample1.vcf.gz",
+        )
+
+        data.resolwe._download_files.assert_called_once_with(
+            files=["123/filtered_variants.vcf.gz"],
+            download_dir="/some/path",
+            show_progress=True,
+            custom_file_name="sample1.vcf.gz",
+        )
+        self.assertEqual(asset_names, ["sample1.vcf.gz"])
+
+    def test_directory_is_renamed_after_download(self):
+        data = self.data_with_assets(
+            ["outdir/file1.txt", "outdir/file2.txt"], ["outdir"]
+        )
+
+        with patch("os.rename") as rename_mock:
+            asset_names = data.download(
+                field_name="out",
+                download_dir="/some/path",
+                custom_asset_name="sample1",
+            )
+
+        # A directory has to be downloaded under its name on the server first.
+        data.resolwe._download_files.assert_called_once_with(
+            files=["123/outdir/file1.txt", "123/outdir/file2.txt"],
+            download_dir="/some/path",
+            show_progress=True,
+        )
+        rename_mock.assert_called_once_with("/some/path/outdir", "/some/path/sample1")
+        self.assertEqual(asset_names, ["sample1"])
+
+    def test_multiple_assets_fail(self):
+        data = self.data_with_assets(["file1.txt", "file2.txt"])
+
+        message = "custom_asset_name can only be given when a single asset"
+        with self.assertRaisesRegex(ValueError, message):
+            data.download(custom_asset_name="single_file.txt")
+
+        data.resolwe._download_files.assert_not_called()
+
+    def test_download_and_rename_delegates_to_download(self):
+        data = self.data_with_assets(["filtered_variants.vcf.gz"])
+        data.download = MagicMock()
+
+        data.download_and_rename(
+            custom_asset_name="sample1.vcf.gz",
+            field_name="vcf",
+            download_dir="/some/path",
+        )
+
+        data.download.assert_called_once_with(
+            file_name=None,
+            field_name="vcf",
+            download_dir="/some/path",
+            custom_asset_name="sample1.vcf.gz",
+        )
+
+    def test_download_and_rename_keeps_existing_asset(self):
+        data = self.data_with_assets(["filtered_variants.vcf.gz"])
+        data.download = MagicMock()
+        download_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, download_dir)
+        with open(os.path.join(download_dir, "sample1.vcf.gz"), "wb") as handle:
+            handle.write(b"already downloaded")
+
+        data.download_and_rename(
+            custom_asset_name="sample1.vcf.gz",
+            field_name="vcf",
+            download_dir=download_dir,
+        )
+
+        data.download.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -258,6 +258,7 @@ class Data(BaseResolweResource):
         download_dir: Optional[str] = None,
         show_progress: bool = True,
         return_dir_names: bool = False,
+        custom_asset_name: Optional[str] = None,
     ) -> list[str]:
         """Download Data object's files and directories.
 
@@ -277,6 +278,15 @@ class Data(BaseResolweResource):
         WARNING: If neither file_name nor field_name is specified and return_dir_names is set
         to True, the method will download both directories and files when the Data object
         contains both. However, the returned list will include only the directory names.
+
+        Set custom_asset_name to save the downloaded asset under a different name, which
+        is useful when the same output field is downloaded from several Data objects into
+        a single directory:
+
+        * re.data.get(42).download(field_name='vcf', custom_asset_name='sample1.vcf.gz')
+
+        A custom name applies to a single asset, so exactly one file or one directory
+        must be matched. The returned list then contains the custom name only.
         """
         if file_name and field_name:
             raise ValueError("Only one of file_name or field_name may be given.")
@@ -290,17 +300,71 @@ class Data(BaseResolweResource):
                 f"{'file name: ' + repr(file_name) if file_name else 'field name: ' + repr(field_name)}."
             )
 
+        dir_names = self._files_dirs("dir", file_name, field_name)
+
+        if custom_asset_name:
+            # Files of a downloaded directory are listed in file_names as well,
+            # so a matched directory counts as a single asset.
+            matched_assets = dir_names if dir_names else file_names
+            if len(matched_assets) != 1:
+                raise ValueError(
+                    f"custom_asset_name can only be given when a single asset is "
+                    f"downloaded, matched: {matched_assets}."
+                )
+            return self._download_renamed(
+                custom_asset_name=custom_asset_name,
+                files=files,
+                source_dir_name=dir_names[0] if dir_names else None,
+                download_dir=download_dir,
+                show_progress=show_progress,
+            )
+
         self.resolwe._download_files(
             files=files, download_dir=download_dir, show_progress=show_progress
         )
 
-        dir_names = self._files_dirs("dir", file_name, field_name)
-        if dir_names and return_dir_names:
-            asset_names = dir_names
-        else:
-            asset_names = file_names
+        return dir_names if (dir_names and return_dir_names) else file_names
 
-        return asset_names
+    def _download_renamed(
+        self,
+        custom_asset_name: str,
+        files: list[str],
+        source_dir_name: Optional[str],
+        download_dir: Optional[str],
+        show_progress: bool,
+    ) -> list[str]:
+        """Download a single asset and save it as custom_asset_name.
+
+        A file is written under the custom name directly, while a directory
+        has to be downloaded under its own name first and renamed afterwards.
+        """
+        if source_dir_name is None:
+            self.resolwe._download_files(
+                files=files,
+                download_dir=download_dir,
+                show_progress=show_progress,
+                custom_file_name=custom_asset_name,
+            )
+            return [custom_asset_name]
+
+        if download_dir is None:
+            download_dir = os.getcwd()
+
+        self.resolwe._download_files(
+            files=files, download_dir=download_dir, show_progress=show_progress
+        )
+
+        self.logger.info(
+            "Renaming the downloaded asset from '%s' to '%s'.",
+            source_dir_name,
+            custom_asset_name,
+        )
+        os.rename(
+            os.path.join(download_dir, source_dir_name),
+            os.path.join(download_dir, custom_asset_name),
+        )
+
+        return [custom_asset_name]
 
     def download_and_rename(
         self,
@@ -310,36 +374,26 @@ class Data(BaseResolweResource):
         file_name: Optional[str] = None,
         download_dir: Optional[str] = None,
     ):
-        """Download and rename an asset from the Data object."""
+        """Download and rename an asset from the Data object.
 
-        if not field_name and not file_name:
-            raise ValueError("Either 'file_name' or 'field_name' must be given.")
-
+        .. deprecated::
+            Use ``download`` with the ``custom_asset_name`` argument instead.
+        """
         if download_dir is None:
             download_dir = os.getcwd()
         destination_asset_path = os.path.join(download_dir, custom_asset_name)
         if os.path.exists(destination_asset_path) and not overwrite_existing:
-            logging.warning(
-                f"File or directory with path '{destination_asset_path}' already exists. "
-                "Skipping download."
+            self.logger.warning(
+                "File or directory with path '%s' already exists. Skipping download.",
+                destination_asset_path,
             )
             return
 
-        source_asset_name = self.download(
+        self.download(
             file_name=file_name,
             field_name=field_name,
             download_dir=download_dir,
-            return_dir_names=True,
-        )[0]
-
-        source_asset_path = os.path.join(download_dir, source_asset_name)
-
-        logging.info(
-            f"Renaming the downloaded asset from '{source_asset_name}' to '{custom_asset_name}'."
-        )
-        os.rename(
-            source_asset_path,
-            destination_asset_path,
+            custom_asset_name=custom_asset_name,
         )
 
     def stdout(self) -> str:

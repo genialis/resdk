@@ -522,6 +522,54 @@ class TestDownload(unittest.TestCase):
         )
         self.assertEqual(resolwe_mock.logger.info.call_count, 3)
 
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_custom_file_name(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": 6,
+                "type": "file",
+                "md5": "e3cdf70a99c1d6890c54ad56bd4a5de1",
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [
+            MagicMock(content=json.dumps(listing)),
+            MagicMock(ok=True, **{"iter_content.return_value": [b"111213"]}),
+        ]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            custom_file_name="renamed.txt",
+        )
+
+        # The size and the checksum are looked up under the name on the server,
+        # while the local copy gets the custom name.
+        with open(os.path.join(self.tmp_dir, "the/first/renamed.txt"), "rb") as handle:
+            self.assertEqual(handle.read(), b"111213")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.tmp_dir, "the/first/file.txt"))
+        )
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_custom_file_name_with_multiple_files(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+
+        message = "custom_file_name can only be given for a single file, got 2."
+        with self.assertRaisesRegex(ValueError, message):
+            Resolwe._download_files(
+                resolwe_mock,
+                files=self.file_list,
+                download_dir=self.tmp_dir,
+                custom_file_name="renamed.txt",
+            )
+
+        resolwe_mock.session.get.assert_not_called()
+
 
 class TestResAuth(unittest.TestCase):
     @patch("resdk.resolwe.ResAuth", spec=True)

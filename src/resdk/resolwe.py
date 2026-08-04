@@ -513,6 +513,7 @@ class Resolwe:
         files: Iterable[Union[str, Path]],
         download_dir: Union[str, None] = None,
         show_progress: bool = True,
+        custom_file_name: Union[str, None] = None,
     ):
         """Download files.
 
@@ -522,8 +523,18 @@ class Resolwe:
         :param files: files to download
         :param download_dir: download directory
             If not specified, the current working directory is used.
+        :param custom_file_name: name to save the downloaded file under
+            instead of its name on the server. Only a single file may be
+            given, since the name applies to one file.
 
         """
+        files = list(files)
+
+        if custom_file_name and len(files) != 1:
+            raise ValueError(
+                f"custom_file_name can only be given for a single file, got {len(files)}."
+            )
+
         if not download_dir:
             download_dir = os.getcwd()
 
@@ -552,7 +563,12 @@ class Resolwe:
                 if not os.path.isdir(full_path):
                     os.makedirs(full_path)
 
-                self.logger.info("* %s", os.path.join(file_path, file_name))
+                # The custom name only applies to the local copy of the file,
+                # the file is still fetched under its name on the server.
+                destination_name = custom_file_name or file_name
+                destination = os.path.join(download_dir, file_path, destination_name)
+
+                self.logger.info("* %s", os.path.join(file_path, destination_name))
 
                 file_directory = os.path.dirname(file_url)
                 if file_directory not in sizes:
@@ -569,11 +585,9 @@ class Resolwe:
                     tqdm.tqdm(
                         total=file_size,
                         disable=not show_progress,
-                        desc=f"Downloading file {file_name}",
+                        desc=f"Downloading file {destination_name}",
                     ) as progress_bar,
-                    open(
-                        os.path.join(download_dir, file_path, file_name), "wb"
-                    ) as file_handle,
+                    open(destination, "wb") as file_handle,
                 ):
                     response = self.session.get(file_url, stream=True, auth=self.auth)
 
@@ -587,13 +601,15 @@ class Resolwe:
                 # Verify md5 checksum:
                 if file_name.endswith(".html"):
                     # Due to backend processing, html file fields have
-                    # checksums that are difficult to reproduce here.
+                    # checksums that are difficult to reproduce here. The name
+                    # on the server decides, a custom name may have any
+                    # extension.
                     continue
                 expected_md5 = checksums[file_directory][file_name]
-                computed_md5 = md5(os.path.join(download_dir, file_path, file_name))
+                computed_md5 = md5(destination)
                 if expected_md5 != computed_md5:
                     raise ValueError(
-                        f"Checksum ({computed_md5}) of downloaded file {file_name} does not match the expected value of {expected_md5}."
+                        f"Checksum ({computed_md5}) of downloaded file {destination_name} does not match the expected value of {expected_md5}."
                     )
 
     def data_usage(self, **query_params):
