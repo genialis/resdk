@@ -2,6 +2,7 @@
 Unit tests for resdk/resolwe.py file.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -522,21 +523,188 @@ class TestDownload(unittest.TestCase):
         )
         self.assertEqual(resolwe_mock.logger.info.call_count, 3)
 
+    def _write_local_file(self, file_uri, content):
+        """Create a local copy of the given file and return its path."""
+        # The data id is stripped from the file path on download.
+        file_path = os.path.dirname(file_uri).split("/", 1)[1]
+        directory = os.path.join(self.tmp_dir, file_path)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, os.path.basename(file_uri))
+        with open(path, "wb") as handle:
+            handle.write(content)
+        return path
+
     @patch("resdk.resolwe.Resolwe", spec=True)
-    def test_custom_file_name(self, resolwe_mock):
+    def test_skip_existing_intact_file(self, resolwe_mock):
         resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+        path = self._write_local_file(self.file_list[0], content)
 
         listing = [
             {
                 "name": "file.txt",
-                "size": 6,
+                "size": len(content),
                 "type": "file",
-                "md5": "e3cdf70a99c1d6890c54ad56bd4a5de1",
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [MagicMock(content=json.dumps(listing))]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            skip_existing=True,
+        )
+
+        # Only the directory listing is fetched, the file itself is not.
+        self.assertEqual(resolwe_mock.session.get.call_count, 1)
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), content)
+        resolwe_mock.logger.info.assert_called_with(
+            "* %s (skipped, already downloaded)", os.path.join("the/first", "file.txt")
+        )
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_skip_existing_corrupted_file(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+        path = self._write_local_file(self.file_list[0], b"truncated")
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": len(content),
+                "type": "file",
+                "md5": hashlib.md5(content).hexdigest(),
             }
         ]
         resolwe_mock.session.get.side_effect = [
             MagicMock(content=json.dumps(listing)),
-            MagicMock(ok=True, **{"iter_content.return_value": [b"111213"]}),
+            MagicMock(ok=True, **{"iter_content.return_value": [content]}),
+        ]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            skip_existing=True,
+        )
+
+        # The local file does not match the checksum, so it is downloaded again.
+        self.assertEqual(resolwe_mock.session.get.call_count, 2)
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), content)
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_skip_existing_missing_file(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": len(content),
+                "type": "file",
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [
+            MagicMock(content=json.dumps(listing)),
+            MagicMock(ok=True, **{"iter_content.return_value": [content]}),
+        ]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            skip_existing=True,
+        )
+
+        self.assertEqual(resolwe_mock.session.get.call_count, 2)
+        with open(os.path.join(self.tmp_dir, "the/first/file.txt"), "rb") as handle:
+            self.assertEqual(handle.read(), content)
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_skip_existing_html_file(self, resolwe_mock):
+        """Html files are always downloaded, their checksums are not verified."""
+        resolwe_mock.configure_mock(**self.config)
+        file_uri = "/the/first/report.html"
+        content = b"<html></html>"
+        path = self._write_local_file(file_uri, content)
+
+        listing = [
+            {
+                "name": "report.html",
+                "size": len(content),
+                "type": "file",
+                "md5": "checksum-that-cannot-be-reproduced-locally",
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [
+            MagicMock(content=json.dumps(listing)),
+            MagicMock(ok=True, **{"iter_content.return_value": [content]}),
+        ]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=[file_uri],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            skip_existing=True,
+        )
+
+        self.assertEqual(resolwe_mock.session.get.call_count, 2)
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), content)
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_intact_file_downloaded_by_default(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+        self._write_local_file(self.file_list[0], content)
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": len(content),
+                "type": "file",
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [
+            MagicMock(content=json.dumps(listing)),
+            MagicMock(ok=True, **{"iter_content.return_value": [content]}),
+        ]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+        )
+
+        self.assertEqual(resolwe_mock.session.get.call_count, 2)
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_custom_file_name(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": len(content),
+                "type": "file",
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [
+            MagicMock(content=json.dumps(listing)),
+            MagicMock(ok=True, **{"iter_content.return_value": [content]}),
         ]
 
         Resolwe._download_files(
@@ -550,9 +718,42 @@ class TestDownload(unittest.TestCase):
         # The size and the checksum are looked up under the name on the server,
         # while the local copy gets the custom name.
         with open(os.path.join(self.tmp_dir, "the/first/renamed.txt"), "rb") as handle:
-            self.assertEqual(handle.read(), b"111213")
+            self.assertEqual(handle.read(), content)
         self.assertFalse(
             os.path.exists(os.path.join(self.tmp_dir, "the/first/file.txt"))
+        )
+
+    @patch("resdk.resolwe.Resolwe", spec=True)
+    def test_skip_existing_custom_file_name(self, resolwe_mock):
+        resolwe_mock.configure_mock(**self.config)
+        content = b"111213"
+        # The name of the local copy decides whether the file is skipped.
+        self._write_local_file("/the/first/renamed.txt", content)
+
+        listing = [
+            {
+                "name": "file.txt",
+                "size": len(content),
+                "type": "file",
+                "md5": hashlib.md5(content).hexdigest(),
+            }
+        ]
+        resolwe_mock.session.get.side_effect = [MagicMock(content=json.dumps(listing))]
+
+        Resolwe._download_files(
+            resolwe_mock,
+            files=self.file_list[:1],
+            download_dir=self.tmp_dir,
+            show_progress=False,
+            skip_existing=True,
+            custom_file_name="renamed.txt",
+        )
+
+        # Only the directory listing is fetched, the file itself is not.
+        self.assertEqual(resolwe_mock.session.get.call_count, 1)
+        resolwe_mock.logger.info.assert_called_with(
+            "* %s (skipped, already downloaded)",
+            os.path.join("the/first", "renamed.txt"),
         )
 
     @patch("resdk.resolwe.Resolwe", spec=True)

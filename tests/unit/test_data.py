@@ -197,6 +197,7 @@ class TestData(unittest.TestCase):
             files=["123/file1.txt", "123/file2.fq.gz"],
             download_dir=None,
             show_progress=True,
+            skip_existing=False,
         )
 
         data_mock.reset_mock()
@@ -205,6 +206,16 @@ class TestData(unittest.TestCase):
             files=["123/file1.txt", "123/file2.fq.gz"],
             download_dir="/some/path/",
             show_progress=True,
+            skip_existing=False,
+        )
+
+        data_mock.reset_mock()
+        Data.download(data_mock, skip_existing=True)
+        data_mock.resolwe._download_files.assert_called_once_with(
+            files=["123/file1.txt", "123/file2.fq.gz"],
+            download_dir=None,
+            show_progress=True,
+            skip_existing=True,
         )
 
     @patch("resdk.resolwe.Resolwe")
@@ -255,6 +266,7 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
         asset_names = data.download(
             field_name="vcf",
             download_dir="/some/path",
+            skip_existing=True,
             custom_asset_name="sample1.vcf.gz",
         )
 
@@ -262,6 +274,7 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
             files=["123/filtered_variants.vcf.gz"],
             download_dir="/some/path",
             show_progress=True,
+            skip_existing=True,
             custom_file_name="sample1.vcf.gz",
         )
         self.assertEqual(asset_names, ["sample1.vcf.gz"])
@@ -283,14 +296,33 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
             files=["123/outdir/file1.txt", "123/outdir/file2.txt"],
             download_dir="/some/path",
             show_progress=True,
+            skip_existing=False,
         )
         rename_mock.assert_called_once_with("/some/path/outdir", "/some/path/sample1")
+        self.assertEqual(asset_names, ["sample1"])
+
+    def test_existing_directory_is_not_downloaded_again(self):
+        data = self.data_with_assets(["outdir/file1.txt"], ["outdir"])
+        download_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, download_dir)
+        os.makedirs(os.path.join(download_dir, "sample1"))
+
+        asset_names = data.download(
+            field_name="out",
+            download_dir=download_dir,
+            skip_existing=True,
+            custom_asset_name="sample1",
+        )
+
+        data.resolwe._download_files.assert_not_called()
         self.assertEqual(asset_names, ["sample1"])
 
     def test_multiple_assets_fail(self):
         data = self.data_with_assets(["file1.txt", "file2.txt"])
 
-        message = "custom_asset_name can only be given when a single asset"
+        message = (
+            "'custom_asset_name' can only be applied when downloading exactly one asset"
+        )
         with self.assertRaisesRegex(ValueError, message):
             data.download(custom_asset_name="single_file.txt")
 
@@ -310,24 +342,21 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
             file_name=None,
             field_name="vcf",
             download_dir="/some/path",
+            skip_existing=True,
             custom_asset_name="sample1.vcf.gz",
         )
 
-    def test_download_and_rename_keeps_existing_asset(self):
-        data = self.data_with_assets(["filtered_variants.vcf.gz"])
-        data.download = MagicMock()
-        download_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, download_dir)
-        with open(os.path.join(download_dir, "sample1.vcf.gz"), "wb") as handle:
-            handle.write(b"already downloaded")
-
+        data.download.reset_mock()
         data.download_and_rename(
             custom_asset_name="sample1.vcf.gz",
+            overwrite_existing=True,
             field_name="vcf",
-            download_dir=download_dir,
         )
 
-        data.download.assert_not_called()
+        self.assertEqual(
+            data.download.call_args.kwargs["skip_existing"],
+            False,
+        )
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ Unreleased
 
 Added
 -----
+- Add the ``skip_existing`` argument to the ``download`` methods of ``Data``,
+  ``Sample`` and ``Collection`` objects. When set to ``True``, files that are
+  already present in the download directory and match the md5 checksum of the
+  file on the server are not downloaded again
 - Add ``estimated_fragment_count_raw`` and ``estimated_fragment_count_trimmed``
   columns to the ``QCTables`` ``general_fastq`` output, reporting the number of
   sequenced fragments (read pairs for paired-end and reads for single-end
@@ -31,7 +35,9 @@ Changed
 - Deprecate the ``download_and_rename`` method of ``Data`` objects in favor of
   ``download`` with the ``custom_asset_name`` argument. The method now
   delegates to ``download``, so a file is written under the custom name
-  directly instead of being renamed afterwards
+  directly instead of being renamed afterwards. Because of that, an existing
+  file is only kept when it matches the md5 checksum of the file on the
+  server, while it used to be kept unconditionally
 
 
 ===================

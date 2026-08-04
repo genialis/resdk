@@ -513,6 +513,7 @@ class Resolwe:
         files: Iterable[Union[str, Path]],
         download_dir: Union[str, None] = None,
         show_progress: bool = True,
+        skip_existing: bool = False,
         custom_file_name: Union[str, None] = None,
     ):
         """Download files.
@@ -523,6 +524,12 @@ class Resolwe:
         :param files: files to download
         :param download_dir: download directory
             If not specified, the current working directory is used.
+        :param show_progress: show a progress bar for each downloaded file
+        :param skip_existing: do not download a file if it already exists
+            in the download directory and its md5 checksum matches the
+            checksum of the file on the server. Files with the ``.html``
+            extension are always downloaded, since their checksums cannot
+            be verified locally.
         :param custom_file_name: name to save the downloaded file under
             instead of its name on the server. Only a single file may be
             given, since the name applies to one file.
@@ -550,7 +557,7 @@ class Resolwe:
             # Store the sizes of files in the given directory.
             # Use the dictionary to cache the responses.
             sizes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-            checksums: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+            checksums: dict[str, dict[str, str]] = defaultdict(lambda: defaultdict(str))
 
             for file_uri in files:
                 file_name = os.path.basename(file_uri)
@@ -563,13 +570,6 @@ class Resolwe:
                 if not os.path.isdir(full_path):
                     os.makedirs(full_path)
 
-                # The custom name only applies to the local copy of the file,
-                # the file is still fetched under its name on the server.
-                destination_name = custom_file_name or file_name
-                destination = os.path.join(download_dir, file_path, destination_name)
-
-                self.logger.info("* %s", os.path.join(file_path, destination_name))
-
                 file_directory = os.path.dirname(file_url)
                 if file_directory not in sizes:
                     content = self.session.get(file_directory, auth=self.auth).content
@@ -580,6 +580,30 @@ class Resolwe:
                         checksums[file_directory][entry["name"]] = entry["md5"]
 
                 file_size = sizes[file_directory][file_name]
+                expected_md5 = checksums[file_directory][file_name]
+                # The custom name only applies to the local copy of the file,
+                # the file is still fetched under its name on the server.
+                destination_name = custom_file_name or file_name
+                destination = os.path.join(download_dir, file_path, destination_name)
+
+                # Due to backend processing, html file fields have
+                # checksums that are difficult to reproduce here. The name on
+                # the server decides, a custom name may have any extension.
+                checksum_verifiable = not file_name.endswith(".html")
+
+                if (
+                    skip_existing
+                    and checksum_verifiable
+                    and os.path.isfile(destination)
+                    and md5(destination) == expected_md5
+                ):
+                    self.logger.info(
+                        "* %s (skipped, already downloaded)",
+                        os.path.join(file_path, destination_name),
+                    )
+                    continue
+
+                self.logger.info("* %s", os.path.join(file_path, destination_name))
 
                 with (
                     tqdm.tqdm(
@@ -599,18 +623,12 @@ class Resolwe:
                             progress_bar.update(len(chunk))
 
                 # Verify md5 checksum:
-                if file_name.endswith(".html"):
-                    # Due to backend processing, html file fields have
-                    # checksums that are difficult to reproduce here. The name
-                    # on the server decides, a custom name may have any
-                    # extension.
-                    continue
-                expected_md5 = checksums[file_directory][file_name]
-                computed_md5 = md5(destination)
-                if expected_md5 != computed_md5:
-                    raise ValueError(
-                        f"Checksum ({computed_md5}) of downloaded file {destination_name} does not match the expected value of {expected_md5}."
-                    )
+                if checksum_verifiable:
+                    computed_md5 = md5(destination)
+                    if expected_md5 != computed_md5:
+                        raise ValueError(
+                            f"Checksum ({computed_md5}) of downloaded file {destination_name} does not match the expected value of {expected_md5}."
+                        )
 
     def data_usage(self, **query_params):
         """Get per-user data usage information.

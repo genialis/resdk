@@ -96,6 +96,7 @@ class BaseCollection(BaseResolweResource):
         file_name: Optional[str] = None,
         field_name: Optional[str] = None,
         download_dir: Optional[str] = None,
+        skip_existing: bool = False,
     ):
         """Download output files of associated Data objects.
 
@@ -108,6 +109,12 @@ class BaseCollection(BaseResolweResource):
 
         * re.collection.get(42).download(file_name='alignment7.bam')
         * re.collection.get(42).download(data_type='bam')
+
+        Set skip_existing to True to skip the download of files that are
+        already present in the download directory and whose md5 checksums
+        match the checksums of the files on the server. Files with the
+        ``.html`` extension are always downloaded, since their checksums
+        cannot be verified locally.
         """
         files = []
 
@@ -118,7 +125,7 @@ class BaseCollection(BaseResolweResource):
             data_files = data.files(file_name, field_name)
             files.extend("{}/{}".format(data.id, file_name) for file_name in data_files)
 
-        self.resolwe._download_files(files, download_dir)
+        self.resolwe._download_files(files, download_dir, skip_existing=skip_existing)
 
 
 class Collection(CollectionRelationsMixin, BaseCollection):

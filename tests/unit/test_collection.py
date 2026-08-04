@@ -69,14 +69,28 @@ class TestBaseCollectionDownload(unittest.TestCase):
         collection_mock.configure_mock(data=[DATA0, DATA2], resolwe=MagicMock())
         BaseCollection.download(collection_mock, field_name="output.exp")
         flist = ["2/outfile.exp"]
-        collection_mock.resolwe._download_files.assert_called_once_with(flist, None)
+        collection_mock.resolwe._download_files.assert_called_once_with(
+            flist, None, skip_existing=False
+        )
 
         # Check if ``output_field`` does not start with 'output'
         collection_mock.reset_mock()
         collection_mock.configure_mock(data=[DATA1, DATA0], resolwe=MagicMock())
         BaseCollection.download(collection_mock, field_name="fastq")
         flist = ["1/reads.fq", "1/arch.gz"]
-        collection_mock.resolwe._download_files.assert_called_once_with(flist, None)
+        collection_mock.resolwe._download_files.assert_called_once_with(
+            flist, None, skip_existing=False
+        )
+
+    @patch("resdk.resources.collection.BaseCollection", spec=True)
+    def test_skip_existing(self, collection_mock):
+        collection_mock.configure_mock(data=[DATA0, DATA2], resolwe=MagicMock())
+        BaseCollection.download(
+            collection_mock, field_name="output.exp", skip_existing=True
+        )
+        collection_mock.resolwe._download_files.assert_called_once_with(
+            ["2/outfile.exp"], None, skip_existing=True
+        )
 
     def test_bad_field_name(self):
         collection = server_resource(Collection, resolwe=MagicMock(), id=1)

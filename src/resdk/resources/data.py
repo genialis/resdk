@@ -258,6 +258,7 @@ class Data(BaseResolweResource):
         download_dir: Optional[str] = None,
         show_progress: bool = True,
         return_dir_names: bool = False,
+        skip_existing: bool = False,
         custom_asset_name: Optional[str] = None,
     ) -> list[str]:
         """Download Data object's files and directories.
@@ -278,6 +279,12 @@ class Data(BaseResolweResource):
         WARNING: If neither file_name nor field_name is specified and return_dir_names is set
         to True, the method will download both directories and files when the Data object
         contains both. However, the returned list will include only the directory names.
+
+        Set skip_existing to True to skip the download of files that are already present
+        in the download directory and whose md5 checksums match the checksums of the
+        files on the server. Files with the ``.html`` extension are always downloaded,
+        since their checksums cannot be verified locally. The returned list of names is
+        not affected by skipping: it always contains all the requested assets.
 
         Set custom_asset_name to save the downloaded asset under a different name, which
         is useful when the same output field is downloaded from several Data objects into
@@ -308,8 +315,9 @@ class Data(BaseResolweResource):
             matched_assets = dir_names if dir_names else file_names
             if len(matched_assets) != 1:
                 raise ValueError(
-                    f"custom_asset_name can only be given when a single asset is "
-                    f"downloaded, matched: {matched_assets}."
+                    f"A 'custom_asset_name' can only be applied when downloading "
+                    f"exactly one asset. Found {matched_assets} matching assets "
+                    f"instead."
                 )
             return self._download_renamed(
                 custom_asset_name=custom_asset_name,
@@ -317,10 +325,14 @@ class Data(BaseResolweResource):
                 source_dir_name=dir_names[0] if dir_names else None,
                 download_dir=download_dir,
                 show_progress=show_progress,
+                skip_existing=skip_existing,
             )
 
         self.resolwe._download_files(
-            files=files, download_dir=download_dir, show_progress=show_progress
+            files=files,
+            download_dir=download_dir,
+            show_progress=show_progress,
+            skip_existing=skip_existing,
         )
 
         return dir_names if (dir_names and return_dir_names) else file_names
@@ -332,6 +344,7 @@ class Data(BaseResolweResource):
         source_dir_name: Optional[str],
         download_dir: Optional[str],
         show_progress: bool,
+        skip_existing: bool,
     ) -> list[str]:
         """Download a single asset and save it as custom_asset_name.
 
@@ -343,15 +356,26 @@ class Data(BaseResolweResource):
                 files=files,
                 download_dir=download_dir,
                 show_progress=show_progress,
+                skip_existing=skip_existing,
                 custom_file_name=custom_asset_name,
             )
             return [custom_asset_name]
 
-        if download_dir is None:
-            download_dir = os.getcwd()
+        download_dir = download_dir or os.getcwd()
+        destination = os.path.join(download_dir, custom_asset_name)
+
+        # Unlike a file, a downloaded directory cannot be verified against a
+        # checksum, so only its existence is checked. Renaming onto an existing
+        # directory would fail anyway.
+        if skip_existing and os.path.exists(destination):
+            self.logger.info("* %s (skipped, already downloaded)", custom_asset_name)
+            return [custom_asset_name]
 
         self.resolwe._download_files(
-            files=files, download_dir=download_dir, show_progress=show_progress
+            files=files,
+            download_dir=download_dir,
+            show_progress=show_progress,
+            skip_existing=skip_existing,
         )
 
         self.logger.info(
@@ -359,10 +383,7 @@ class Data(BaseResolweResource):
             source_dir_name,
             custom_asset_name,
         )
-        os.rename(
-            os.path.join(download_dir, source_dir_name),
-            os.path.join(download_dir, custom_asset_name),
-        )
+        os.rename(os.path.join(download_dir, source_dir_name), destination)
 
         return [custom_asset_name]
 
@@ -378,21 +399,14 @@ class Data(BaseResolweResource):
 
         .. deprecated::
             Use ``download`` with the ``custom_asset_name`` argument instead.
+            Note that a file is only kept when its md5 checksum matches the
+            checksum on the server, while this method keeps any existing file.
         """
-        if download_dir is None:
-            download_dir = os.getcwd()
-        destination_asset_path = os.path.join(download_dir, custom_asset_name)
-        if os.path.exists(destination_asset_path) and not overwrite_existing:
-            self.logger.warning(
-                "File or directory with path '%s' already exists. Skipping download.",
-                destination_asset_path,
-            )
-            return
-
         self.download(
             file_name=file_name,
             field_name=field_name,
             download_dir=download_dir,
+            skip_existing=not overwrite_existing,
             custom_asset_name=custom_asset_name,
         )
 
