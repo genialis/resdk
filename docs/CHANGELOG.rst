@@ -38,6 +38,10 @@ Changed
   directly instead of being renamed afterwards. Because of that, an existing
   file is only kept when it matches the md5 checksum of the file on the
   server, while it used to be kept unconditionally
+- Download each MultiQC report file only once in ``QCTables``, so that data
+  types backed by the same file, e.g. ``general_fastq``, ``general_alignment``,
+  ``general_quantification`` and ``general_qc``, no longer each make a
+  separate download pass over the collection
 
 
 ===================

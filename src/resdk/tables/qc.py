@@ -14,8 +14,10 @@ QCTables
 
 import re
 import warnings
+from collections import Counter, defaultdict
 from contextlib import suppress
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -551,6 +553,17 @@ class QCTables(BaseTables):
             set(group for data in self.DATA_TYPES.values() for group in data["groups"])
         )
 
+        # Some MultiQC files back more than one data type. For example
+        # multiqc_general_stats.txt is the source of general_fastq,
+        # general_alignment, general_quantification and general_qc, which are
+        # just different column subsets of it. Such a file is worth keeping in
+        # memory so that it is downloaded once per sample instead of once per
+        # sample and data type.
+        file_counts = Counter(data["file"] for data in self.DATA_TYPES.values())
+        self._shared_files = {file for file, count in file_counts.items() if count > 1}
+        # Shared report file name -> {sample id: raw file content}.
+        self._raw_reports = defaultdict(dict)
+
     @lru_cache()
     def _mate_fastq_groups(self) -> dict[int, Optional[list[list[str]]]]:
         """Map each sample id to its read-mate FASTQ file grouping.
@@ -605,11 +618,63 @@ class QCTables(BaseTables):
         before delegating to the async download keeps it out of the per-file
         coroutines, where it would block the asyncio event loop and serialize
         the otherwise parallel downloads.
+
+        When the file backing ``data_type`` was already downloaded for another
+        data type, it is parsed from memory and no request is made at all.
         """
         if data_type == self.GENERAL_FASTQ:
             self._mate_fastq_groups()
 
-        return await super()._download_data(data_type)
+        report_file = self.DATA_TYPES[data_type]["file"]
+        if raw_reports := self._raw_reports.get(report_file):
+            return self._parse_raw_reports(data_type, raw_reports)
+
+        try:
+            return await super()._download_data(data_type)
+        except BaseException:
+            # Keep only content of files that were downloaded in full, so that
+            # a failed download leaves nothing behind, just as it does for the
+            # tables themselves.
+            self._raw_reports.pop(report_file, None)
+            raise
+
+    async def _download_file(self, url, session, sample_id, data_type):
+        """Download a single report file and parse it.
+
+        ``BaseTables._download_file`` discards the file content as soon as it
+        is parsed. For files that back several data types the content is kept
+        instead, so that the remaining data types can be built without
+        downloading the very same bytes again.
+        """
+        report_file = self.DATA_TYPES[data_type]["file"]
+        if report_file not in self._shared_files:
+            return await super()._download_file(url, session, sample_id, data_type)
+
+        async with session.get(url) as response:
+            response.raise_for_status()
+            content = await response.content.read()
+
+        self._raw_reports[report_file][sample_id] = content
+        with BytesIO(content) as f:
+            return self._parse_file(f, sample_id, data_type)
+
+    def _parse_raw_reports(
+        self, data_type: str, raw_reports: dict[int, bytes]
+    ) -> pd.DataFrame:
+        """Build the table for ``data_type`` from already downloaded files.
+
+        Mirrors the assembly done at the end of
+        ``BaseTables._download_data``, but parses the cached file content
+        instead of fetching it.
+        """
+        parsed = []
+        for sample_id, content in raw_reports.items():
+            with BytesIO(content) as f:
+                parsed.append(self._parse_file(f, sample_id, data_type))
+
+        df = pd.concat(parsed, axis=1).T.sort_index().sort_index(axis=1)
+        df.index.name = "sample_id"
+        return df
 
     def _parse_file(self, file_obj, sample_id, data_type):
         """Parse file object and return one DataFrame line."""
