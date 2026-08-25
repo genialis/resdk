@@ -82,7 +82,7 @@ test = [
 ]
 [project.urls]
 repository = "https://github.com/genialis/resolwe-bio-py/"
-documentation = "https://resdk.readthedocs.io/en/latest/"
+documentation = "https://docs.genialis.com/resdk/"
 
 [tool.setuptools_scm]
 

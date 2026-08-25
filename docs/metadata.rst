@@ -16,8 +16,8 @@ exactly one-on-one mapping between rows in such table and samples in
 collection. In such case, please use the "unique" flavour of the above
 process, `Metadata table (one-to-one)`_.
 
-.. _Metadata table: https://resolwe-bio.readthedocs.io/en/latest/catalog-definitions.html#process-upload-metadata
-.. _Metadata table (one-to-one): https://resolwe-bio.readthedocs.io/en/latest/catalog-definitions.html#process-upload-metadata-unique
+.. _Metadata table: https://docs.genialis.com/resolwe-bio/catalog-definitions.html#process-upload-metadata
+.. _Metadata table (one-to-one): https://docs.genialis.com/resolwe-bio/catalog-definitions.html#process-upload-metadata-unique
 
 Metadata in ReSDK is just a special kind of ``Data`` resource that
 simplifies retrieval of the above mentioned tables. In addition to all

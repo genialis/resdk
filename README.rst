@@ -2,7 +2,7 @@
 Resolwe SDK for Python
 ======================
 
-|build| |build-e2e| |coverage| |docs| |pypi_version| |pypi_pyversions|
+|build| |build-e2e| |coverage| |pypi_version| |pypi_pyversions|
 
 .. |build| image:: https://github.com/genialis/resolwe-bio-py/workflows/ReSDK%20CI/badge.svg?branch=master
     :target: https://github.com/genialis/resolwe-bio-py/actions?query=branch%3Amaster
@@ -15,10 +15,6 @@ Resolwe SDK for Python
 .. |coverage| image:: https://img.shields.io/codecov/c/github/genialis/resolwe-bio-py/master.svg
     :target: http://codecov.io/github/genialis/resolwe-bio-py?branch=master
     :alt: Coverage Status
-
-.. |docs| image:: https://readthedocs.org/projects/resdk/badge/?version=latest
-    :target: http://resdk.readthedocs.io/
-    :alt: Documentation Status
 
 .. |pypi_version| image:: https://img.shields.io/pypi/v/resdk.svg
     :target: https://pypi.python.org/pypi/resdk
@@ -45,7 +41,7 @@ Docs & Help
 
 Read the detailed description in documentation_.
 
-.. _documentation: http://resdk.readthedocs.io/
+.. _documentation: https://docs.genialis.com/resdk/
 
 Install
 =======
@@ -61,7 +57,7 @@ If you would like to contribute to the SDK codebase, follow the
 
   If you are using Apple silicon you should use Python version 3.10 or higher.
 
-.. _installation steps for developers: http://resdk.readthedocs.io/en/latest/contributing.html
+.. _installation steps for developers: https://docs.genialis.com/resdk/contributing.html
 
 Quick Start
 ===========
@@ -89,7 +85,7 @@ Both files (BAM and BAI) have downloaded to the working directory.
 Check them out. To learn more about the Resolwe SDK continue with
 `Getting started`_.
 
-.. _Getting started: http://resdk.readthedocs.io/en/latest/tutorials.html
+.. _Getting started: https://docs.genialis.com/resdk/tutorials.html
 
 If you do not have access to the Resolwe server, contact us at
 info@genialis.com.

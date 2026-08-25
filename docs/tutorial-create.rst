@@ -30,7 +30,7 @@ Upload files
 
 We will upload fastq single end reads with the `upload-fastq-single`_ process.
 
-.. _upload-fastq-single: http://resolwe-bio.readthedocs.io/en/latest/catalog-definitions.html#process-upload-fastq-single
+.. _upload-fastq-single: https://docs.genialis.com/resolwe-bio/catalog-definitions.html#process-upload-fastq-single
 
 .. literalinclude:: files/tutorial-create.py
    :lines: 18-25
@@ -164,8 +164,8 @@ Various bioinformatic processes are available to properly analyze sequencing
 data. Many of these pipelines are available via Resolwe SDK, and are listed in
 the `Process catalog`_ of the `Resolwe Bioinformatics documentation`_.
 
-.. _Process catalog: http://resolwe-bio.readthedocs.io/en/latest/catalog.html
-.. _Resolwe Bioinformatics documentation: http://resolwe-bio.readthedocs.io
+.. _Process catalog: https://docs.genialis.com/resolwe-bio/catalog.html
+.. _Resolwe Bioinformatics documentation: https://docs.genialis.com/resolwe-bio/
 
 After uploading reads file, the next step is to align reads to a genome. We
 will use STAR aligner, which is wrapped in a process with slug
@@ -173,7 +173,7 @@ will use STAR aligner, which is wrapped in a process with slug
 `STAR process catalog`_. We will define input files and the process will run
 its algorithm that transforms inputs into outputs.
 
-.. _STAR process catalog: https://resolwe-bio.readthedocs.io/en/latest/catalog-definitions.html#process-alignment-star
+.. _STAR process catalog: https://docs.genialis.com/resolwe-bio/catalog-definitions.html#process-alignment-star
 
 .. literalinclude:: files/tutorial-create.py
    :lines: 67-76

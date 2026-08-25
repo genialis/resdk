@@ -98,7 +98,7 @@ Let's say we now want to find some genome indices. We don't always know the *id*
 *slug*, or *name* by heart, but we can use `filters`_ to find them. We will
 first count all genome index data objects:
 
-.. _filters: http://resdk.readthedocs.io/en/latest/ref.html#resdk.ResolweQuery
+.. _filters: https://docs.genialis.com/resdk/ref.html#resdk.ResolweQuery
 
 .. literalinclude:: files/start.py
   :lines: 13
@@ -119,7 +119,7 @@ This is quite a lot of objects! We can filter even further:
 For future work we want to get the genome with a specific slug. We will `get`_
 it and store a reference to it for later:
 
-.. _get: http://resdk.readthedocs.io/en/latest/ref.html#resdk.ResolweQuery.get
+.. _get: https://docs.genialis.com/resdk/ref.html#resdk.ResolweQuery.get
 
 .. literalinclude:: files/start.py
   :lines: 17,18
@@ -143,7 +143,7 @@ and inspect the list of files it contains:
 
 These and many other data object attributes/methods are described `here`_.
 
-.. _here: http://resdk.readthedocs.io/en/latest/ref.html#resdk.resources.Data
+.. _here: https://docs.genialis.com/resdk/ref.html#resdk.resources.Data
 
 Run alignment
 =============
@@ -155,7 +155,7 @@ we will only test the STAR alignment process, but many more processes are
 available (see the `Process catalog`_). This process automatically creates a
 BAM alignment file and BAI index, along with some other files.
 
-.. _Process catalog: http://resolwe-bio.readthedocs.io/en/latest/catalog.html
+.. _Process catalog: https://docs.genialis.com/resolwe-bio/catalog.html
 
 Let's run STAR on our reads, using our genome:
 
@@ -168,7 +168,7 @@ time. Note that we have stored the reference to the alignment object in a
 ``bam`` variable. We can check the `status`_ of the process to determine if
 the processing has finished:
 
-.. _status: http://resdk.readthedocs.io/en/latest/ref.html#resdk.resources.Data.status
+.. _status: https://docs.genialis.com/resdk/ref.html#resdk.resources.Data.status
 
 .. literalinclude:: files/start.py
   :lines: 38

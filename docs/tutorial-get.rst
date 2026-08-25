@@ -64,7 +64,7 @@ example:
   For a complete list of processes, their categories and definitions, please
   visit `resolwe-bio docs`_
 
-.. _`resolwe-bio docs`: https://resolwe-bio.readthedocs.io/
+.. _`resolwe-bio docs`: https://docs.genialis.com/resolwe-bio/
 
 But the real power of the ``filter()`` method is in combining multiple
 parameters:
