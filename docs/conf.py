@@ -44,8 +44,8 @@ todo_include_todos = False
 
 # -- Options for HTML output ----------------------------------------------
 
-# The theme to use for HTML and HTML Help pages.
-html_theme = "sphinx_nefertiti"
+# The HTML theme, selectable per environment.
+html_theme = os.environ.get("SPHINX_HTML_THEME") or "sphinx_nefertiti"
 
 DOCS_HOST = os.environ.get("DOCS_HOST", "docs.genialis.com")
 GOOGLE_ANALYTICS_ID = os.environ.get("GOOGLE_ANALYTICS_ID", "")
@@ -53,7 +53,6 @@ GOOGLE_ANALYTICS_ID = os.environ.get("GOOGLE_ANALYTICS_ID", "")
 html_theme_options = {
     "project_short": project,
     "logo_url": f"https://{DOCS_HOST}/",
-    "google_analytics_id": GOOGLE_ANALYTICS_ID,
     "style_header_neutral": True,
     "style": "yellow",
 
@@ -64,6 +63,10 @@ html_theme_options = {
         },
     ],
 }
+
+# The analytics option is theme-specific.
+if GOOGLE_ANALYTICS_ID:
+    html_theme_options["google_analytics_id"] = GOOGLE_ANALYTICS_ID
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {"python": ("https://docs.python.org/3", None)}

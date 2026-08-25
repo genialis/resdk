@@ -60,7 +60,7 @@ dependencies = [
 [project.optional-dependencies]
 docs = [
     "sphinx",
-    "sphinx-nefertiti @ git+https://github.com/genialis/genialis-docs-theme",
+    "sphinx-nefertiti>=0.9",
     # TODO: Consider using sphinx-pyproject in the future. At the time of this
     # writing the missing feature was disability of sphinx-pyproject to detect
     # dynamic project version
