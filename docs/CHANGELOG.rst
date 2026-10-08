@@ -26,6 +26,8 @@ Fixed
 -----
 - Raise an error if a user calls the download method
   on a data object and inputs a non-existing file or field name
+- Query reads objects in batches in ``QCTables`` to avoid exceeding the URL
+  length limit on large collections
 
 Changed
 -------

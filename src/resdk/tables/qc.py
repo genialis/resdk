@@ -571,8 +571,8 @@ class QCTables(BaseTables):
         object is used, i.e. the uploaded reads rather than a downstream (e.g.
         trimmed) object.
 
-        The reads objects for all samples are resolved in a single query so
-        that no per-sample API request is issued from within the async
+        The reads objects for all samples are resolved up front, in batched
+        queries, so that no per-sample API request is issued from within the async
         download coroutines. Each value is one list of cleaned MultiQC sample
         names per read mate (see :func:`_mate_file_groups`), or ``None`` if the
         origin reads object cannot be resolved.
@@ -588,14 +588,21 @@ class QCTables(BaseTables):
         if not all_input_ids:
             return {}
 
-        reads_output = {
-            reads.id: reads.output
-            for reads in self.resolwe.data.filter(
-                id__in=list(all_input_ids),
-                type="data:reads:fastq:",
-                fields=["id", "output"],
-            ).iterate()
-        }
+        # Query in batches: a single query with all ids exceeds the URL length
+        # limit on large collections. A batch matches at most batch_size
+        # objects, so each one is fetched in a single request.
+        all_input_ids = sorted(all_input_ids)
+        batch_size = 500
+        reads_output = {}
+        for i in range(0, len(all_input_ids), batch_size):
+            reads_output.update(
+                (reads.id, reads.output)
+                for reads in self.resolwe.data.filter(
+                    id__in=all_input_ids[i : i + batch_size],
+                    type="data:reads:fastq:",
+                    fields=["id", "output"],
+                )
+            )
 
         mate_groups = {}
         for sample_id, input_ids in sample_to_input_ids.items():
