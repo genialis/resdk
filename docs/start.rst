@@ -56,6 +56,45 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
 
 .. note::
 
+  You can also authenticate with an Auth0 access token instead of a session.
+  Call ``res.login_with_auth0()`` to sign in. With a browser on this machine,
+  Auth0 opens in it. Without one, for example over SSH or on a remote Jupyter
+  server, ReSDK prints an address and a short code: open the address on any
+  device, check that it shows the same code, and approve the sign-in. Approve
+  only codes that your own program printed. Pass ``device=True`` or
+  ``device=False`` to choose the method yourself.
+
+  The access token lasts 10 minutes and ReSDK renews it in memory for up to
+  7 days. Nothing is written to disk, so every new Python process signs in
+  again.
+
+  Scripts and CI jobs can keep using ``RESOLWE_API_USERNAME`` and
+  ``RESOLWE_API_PASSWORD``. On the server of the selected tenant
+  (app.genialis.com for ``production``, qa.genialis.io for ``test``), ReSDK
+  sends them to Auth0 and renews the tokens it gets back. This works for
+  accounts with an Auth0 password and without MFA. On any other server, and on
+  a server that does not accept Auth0 tokens yet, ReSDK uses the server's own
+  password login.
+
+  A token you already have can be passed as ``resdk.Resolwe(url=...,
+  token=...)``, set with ``res.login_with_token(token)``, or put in the
+  ``RESDK_TOKEN`` environment variable, which is used unless both
+  ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` are set. Such a token
+  is not renewed: when it expires, set a new one.
+
+  ``RESDK_AUTH0_TENANT`` selects the Auth0 tenant: ``production`` (the
+  default, for app.genialis.com) or ``test`` (for qa.genialis.io).
+
+  ``login_with_auth0()`` prints the account it signed in with; check that it
+  is yours. On a machine shared with other users, another user can see the
+  sign-in address and complete it with their own account, so set
+  ``RESDK_TOKEN`` there instead.
+
+  Other packages, such as gpm, get a renewed token without connecting to
+  Resolwe with ``resdk.auth.sign_in()``.
+
+.. note::
+
 	When connecting to the server through an interactive session, we suggest you
 	use the ``resdk.start_logging()`` command. This allows you to see important
 	messages (*e.g.* warnings and errors) when executing commands.
