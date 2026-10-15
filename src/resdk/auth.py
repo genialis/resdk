@@ -6,9 +6,13 @@ Authentication
 
 Auth0 sign-in for bearer-token authentication.
 
-Implements the OAuth 2.0 Authorization Code flow with PKCE: the user signs in
-at Auth0 in a browser, Auth0 redirects back to a short-lived HTTP server on
-``127.0.0.1``, and the authorization code is exchanged for an access token.
+With a browser on this machine, it uses the OAuth 2.0 Authorization Code flow
+with PKCE: the user signs in at Auth0 in a browser, Auth0 redirects back to a
+short-lived HTTP server on ``127.0.0.1``, and the authorization code is
+exchanged for an access token. Without one, for example over SSH or on a
+remote Jupyter server, it uses the Device Authorization Flow (RFC 8628): it
+prints an address and a short code, the user approves the sign-in on any
+device, and Auth0 hands the token over.
 The token is kept in memory only (never written to disk) and is sent to the
 Resolwe server as ``Authorization: Bearer <token>`` by
 :class:`resdk.resolwe.ResAuth`.
@@ -321,22 +325,114 @@ def _token_body(response: requests.Response) -> dict:
     return body
 
 
-def sign_in(settings: Optional[Auth0Settings] = None) -> Auth0Session:
+def sign_in(
+    settings: Optional[Auth0Settings] = None, *, device: Optional[bool] = None
+) -> Auth0Session:
     """Sign in to Auth0 and return a session that renews its access token.
 
     The token in :data:`TOKEN_ENV_VAR` is used if set, without renewal;
-    otherwise the user signs in through the browser. Nothing is written to
-    disk, so every new process signs in again.
+    otherwise the user signs in. Nothing is written to disk, so every new
+    process signs in again.
 
     :param settings: Auth0 settings; read from :data:`TENANT_ENV_VAR` when
         omitted.
+    :param device: ``True`` to sign in with the Device Authorization Flow,
+        ``False`` to use the browser on this machine. By default the device
+        flow is used when this machine has no browser to open.
     """
     token = token_from_env()
     if token:
         return Auth0Session(token)
     if settings is None:
         settings = Auth0Settings.from_env()
-    return Auth0Session.from_token_response(_browser_sign_in(settings), settings)
+    if device is None:
+        device = not _browser_available()
+    body = _device_sign_in(settings) if device else _browser_sign_in(settings)
+    return Auth0Session.from_token_response(body, settings)
+
+
+def _browser_available() -> bool:
+    """Return whether a browser on this machine can receive Auth0's redirect.
+
+    Over SSH, or on Linux without a display, a browser would open (if at all)
+    on another machine, where the redirect to ``127.0.0.1`` cannot reach us.
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+    if sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        return False
+    try:
+        webbrowser.get()
+    except webbrowser.Error:
+        return False
+    return True
+
+
+def _device_sign_in(settings: Auth0Settings) -> dict:
+    """Sign in with the Device Authorization Flow; return Auth0's token response.
+
+    Prints an address and a code. The user opens the address on any device,
+    checks the code and approves the sign-in; meanwhile this polls Auth0.
+
+    :raises TimeoutError: if the code expires before the sign-in is approved.
+    :raises RuntimeError: if the sign-in is denied or Auth0 refuses it.
+    """
+    response = requests.post(
+        f"https://{settings.domain}/oauth/device/code",
+        data={
+            "client_id": settings.client_id,
+            "scope": settings.scope,
+            "audience": settings.audience,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Auth0 did not start a sign-in: {response.text[:300]}")
+    code = response.json()
+    address = code.get("verification_uri_complete") or code["verification_uri"]
+    print(
+        f"To sign in to Resolwe, open {address} on any device and check that it "
+        f"shows the code {code['user_code']}. Only approve codes that this "
+        "program printed.",
+        file=sys.stderr,
+    )
+    interval = float(code.get("interval", 5))
+    deadline = time.monotonic() + float(code.get("expires_in", 900))
+    while True:
+        time.sleep(interval)
+        if time.monotonic() > deadline:
+            raise TimeoutError("The sign-in code expired before it was approved.")
+        try:
+            response = requests.post(
+                f"https://{settings.domain}/oauth/token",
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": code["device_code"],
+                    "client_id": settings.client_id,
+                },
+                timeout=30,
+            )
+        except requests.RequestException:
+            # A dropped connection: keep polling until the code expires.
+            continue
+        if response.ok:
+            return _token_body(response)
+        try:
+            error = response.json().get("error")
+        except ValueError:
+            error = None
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval += 5
+            continue
+        if error == "expired_token":
+            raise TimeoutError("The sign-in code expired before it was approved.")
+        if error == "access_denied":
+            raise RuntimeError("The sign-in was denied.")
+        raise RuntimeError(f"Auth0 did not issue a token: {response.text[:300]}")
 
 
 def get_access_token(settings: Optional[Auth0Settings] = None) -> str:

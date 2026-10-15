@@ -350,16 +350,25 @@ class Resolwe:
         """
         self._login(token=token)
 
-    def login_with_auth0(self, settings: Optional[auth.Auth0Settings] = None):
-        """Sign in through Auth0 in the browser and use the resulting token.
+    def login_with_auth0(
+        self,
+        settings: Optional[auth.Auth0Settings] = None,
+        device: Optional[bool] = None,
+    ):
+        """Sign in through Auth0 and use the resulting token.
 
-        If ``RESDK_TOKEN`` is set, that token is used and no browser is opened
-        (for machines without a browser). The token is kept in memory only.
+        If ``RESDK_TOKEN`` is set, that token is used and nobody signs in.
+        Otherwise the browser on this machine is used, or, without one, the
+        Device Authorization Flow, which prints an address and a code to
+        approve on any device. The tokens are kept in memory only and the
+        access token is renewed before it expires.
 
-        :param settings: Auth0 settings; read from ``RESDK_AUTH0_TENANT``
-            environment variables when omitted.
+        :param settings: Auth0 settings; read from ``RESDK_AUTH0_TENANT`` when
+            omitted.
+        :param device: ``True`` for the device flow, ``False`` for the browser;
+            chosen automatically by default.
         """
-        self._login(token=auth.sign_in(settings))
+        self._login(token=auth.sign_in(settings, device=device))
         # Another user on the same machine can see the sign-in URL and complete
         # it with their own account, so show which account was signed in.
         if self.auth.username:

@@ -164,7 +164,10 @@ class TestGetAccessToken(unittest.TestCase):
                 login_mock.assert_not_called()
 
     def test_interactive_login_used_without_env_token(self):
-        with patch.dict("os.environ", {}, clear=True):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(auth, "_browser_available", return_value=True),
+        ):
             with patch.object(
                 auth, "_browser_sign_in", return_value={"access_token": "signed-token"}
             ) as m:
@@ -177,7 +180,7 @@ class TestSignIn(unittest.TestCase):
         body = {"access_token": "a1", "refresh_token": "r1", "expires_in": 600}
         with patch.dict("os.environ", {}, clear=True):
             with patch.object(auth, "_browser_sign_in", return_value=body):
-                session = auth.sign_in(SETTINGS)
+                session = auth.sign_in(SETTINGS, device=False)
         self.assertIsInstance(session, auth.Auth0Session)
         self.assertTrue(session.can_refresh)
         self.assertEqual(session.access_token, "a1")
@@ -187,6 +190,103 @@ class TestSignIn(unittest.TestCase):
             session = auth.sign_in()
         self.assertFalse(session.can_refresh)
         self.assertEqual(session.access_token, "env-token")
+
+
+class TestDeviceSignIn(unittest.TestCase):
+    CODE = {
+        "device_code": "dev",
+        "user_code": "BDWP-HQPK",
+        "verification_uri": "https://example.auth0.com/activate",
+        "verification_uri_complete": "https://example.auth0.com/activate?user_code=BDWP-HQPK",
+        "expires_in": 900,
+        "interval": 5,
+    }
+
+    def _run(self, *answers):
+        responses = [_token_response(**self.CODE), *answers]
+        with (
+            patch.object(auth.requests, "post", side_effect=responses) as post,
+            patch.object(auth.time, "sleep") as sleep,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            try:
+                return auth._device_sign_in(SETTINGS), post, sleep, stderr.getvalue()
+            except Exception as error:
+                return error, post, sleep, stderr.getvalue()
+
+    def test_polls_until_approved(self):
+        body, post, sleep, printed = self._run(
+            _token_response(403, error="authorization_pending"),
+            _token_response(429, error="slow_down"),
+            _token_response(access_token="a1", refresh_token="r1", expires_in=600),
+        )
+        self.assertEqual(body["access_token"], "a1")
+        self.assertIn("BDWP-HQPK", printed)
+        self.assertIn("activate?user_code=BDWP-HQPK", printed)
+        start = post.call_args_list[0]
+        self.assertEqual(start.args[0], "https://example.auth0.com/oauth/device/code")
+        self.assertEqual(start.kwargs["data"]["audience"], SETTINGS.audience)
+        poll = post.call_args_list[1].kwargs["data"]
+        self.assertEqual(
+            poll,
+            {
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": "dev",
+                "client_id": "cid",
+            },
+        )
+        # slow_down adds 5 seconds to the interval.
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [5.0, 5.0, 10.0])
+
+    def test_network_error_while_polling_keeps_polling(self):
+        body, post, sleep, printed = self._run(
+            requests.ConnectionError("reset"),
+            _token_response(access_token="a1", refresh_token="r1", expires_in=600),
+        )
+        self.assertEqual(body["access_token"], "a1")
+
+    def test_denied_sign_in_stops(self):
+        error, *_ = self._run(_token_response(403, error="access_denied"))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn("denied", str(error))
+
+    def test_expired_code_stops(self):
+        error, *_ = self._run(_token_response(403, error="expired_token"))
+        self.assertIsInstance(error, TimeoutError)
+
+    def test_unexpected_error_stops(self):
+        error, *_ = self._run(_token_response(400, error="invalid_request"))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn("did not issue a token", str(error))
+
+
+class TestChoosingTheSignIn(unittest.TestCase):
+    BODY = {"access_token": "a1", "refresh_token": "r1", "expires_in": 600}
+
+    def _sign_in(self, env, **kwargs):
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch.object(auth, "_device_sign_in", return_value=self.BODY) as device,
+            patch.object(auth, "_browser_sign_in", return_value=self.BODY) as browser,
+            patch.object(auth.sys, "platform", "linux"),
+            patch.object(auth.webbrowser, "get"),
+        ):
+            auth.sign_in(SETTINGS, **kwargs)
+        return device.called, browser.called
+
+    def test_device_flow_over_ssh(self):
+        env = {"SSH_CONNECTION": "1 2 3 4", "DISPLAY": ":0"}
+        self.assertEqual(self._sign_in(env), (True, False))
+
+    def test_device_flow_on_linux_without_a_display(self):
+        self.assertEqual(self._sign_in({}), (True, False))
+
+    def test_browser_with_a_display(self):
+        self.assertEqual(self._sign_in({"DISPLAY": ":0"}), (False, True))
+
+    def test_explicit_choice_wins(self):
+        self.assertEqual(self._sign_in({}, device=False), (False, True))
+        self.assertEqual(self._sign_in({"DISPLAY": ":0"}, device=True), (True, False))
 
 
 class TestAuth0Session(unittest.TestCase):
