@@ -90,12 +90,17 @@ class TestAuth0Settings(unittest.TestCase):
             settings = auth.Auth0Settings.from_env()
         self.assertEqual(settings.domain, "genialis-test.eu.auth0.com")
         self.assertEqual(settings.client_id, auth.TENANTS["test"]["client_id"])
-        self.assertEqual(settings.audience, "https://api.genialis.com")
+        self.assertEqual(settings.audience, "https://api.genialis.io")
 
     def test_production_is_the_default(self):
         tenants = {
             **auth.TENANTS,
-            "production": {"domain": "p.example", "client_id": "p"},
+            "production": {
+                "domain": "p.example",
+                "client_id": "p",
+                "audience": "https://api.p.example",
+                "servers": (),
+            },
         }
         with patch.object(auth, "TENANTS", tenants):
             for env in ({}, {"RESDK_AUTH0_TENANT": ""}):
@@ -113,7 +118,7 @@ class TestAuth0Settings(unittest.TestCase):
     def test_tenant_without_an_application_is_explained(self):
         tenants = {
             **auth.TENANTS,
-            "production": {"domain": "p.example", "client_id": None},
+            "production": {"domain": "p.example", "client_id": None, "servers": ()},
         }
         with patch.object(auth, "TENANTS", tenants):
             with patch.dict("os.environ", {}, clear=True):
@@ -146,7 +151,9 @@ class TestAuth0Settings(unittest.TestCase):
         self.assertEqual(settings.domain, "genialis-test.eu.auth0.com")
 
 
-SETTINGS = auth.Auth0Settings(domain="example.auth0.com", client_id="cid")
+SETTINGS = auth.Auth0Settings(
+    domain="example.auth0.com", client_id="cid", audience="https://api.example"
+)
 
 
 def _token_response(status=200, **body):
@@ -258,6 +265,132 @@ class TestDeviceSignIn(unittest.TestCase):
         error, *_ = self._run(_token_response(400, error="invalid_request"))
         self.assertIsInstance(error, RuntimeError)
         self.assertIn("did not issue a token", str(error))
+
+
+class TestPasswordSignIn(unittest.TestCase):
+    def test_sends_the_password_grant_to_auth0(self):
+        ok = _token_response(access_token="a1", refresh_token="r1", expires_in=600)
+        with patch.object(auth.requests, "post", return_value=ok) as post:
+            session = auth.sign_in(SETTINGS, username="u@example.com", password="pw")
+        self.assertTrue(session.can_refresh)
+        self.assertEqual(
+            post.call_args.args[0], "https://example.auth0.com/oauth/token"
+        )
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["grant_type"], "password")
+        self.assertEqual((data["username"], data["password"]), ("u@example.com", "pw"))
+        self.assertEqual(data["audience"], SETTINGS.audience)
+        self.assertIn("offline_access", data["scope"])
+
+    def test_refusal_is_explained_without_the_password(self):
+        refused = _token_response(
+            403, error="invalid_grant", error_description="Wrong email or password."
+        )
+        with patch.object(auth.requests, "post", return_value=refused):
+            with self.assertRaises(RuntimeError) as raised:
+                auth.sign_in(SETTINGS, username="u@example.com", password="secret-pw")
+        self.assertIn("Wrong email or password.", str(raised.exception))
+        self.assertNotIn("secret-pw", str(raised.exception))
+
+    def test_password_wins_over_the_environment_token(self):
+        ok = _token_response(access_token="a1", refresh_token="r1", expires_in=600)
+        with (
+            patch.dict("os.environ", {auth.TOKEN_ENV_VAR: "env-token"}, clear=True),
+            patch.object(auth.requests, "post", return_value=ok),
+        ):
+            session = auth.sign_in(SETTINGS, username="u", password="p")
+        self.assertEqual(session.access_token, "a1")
+
+
+class TestLoginWithPassword(unittest.TestCase):
+    PAIRED = auth.Auth0Settings(
+        domain="example.auth0.com",
+        client_id="cid",
+        audience="https://api.example",
+        servers=("app.example",),
+    )
+
+    def _resolwe(self, accepted, url="https://app.example"):
+        resolwe = MagicMock(url=url)
+        resolwe.auth.username = None
+
+        def login(username=None, password=None, token=None):
+            # The user lookup succeeds only when the server accepts the login.
+            if token is None or accepted:
+                resolwe.auth.username = "u@example.com"
+
+        resolwe._login.side_effect = login
+        return resolwe
+
+    def _login(self, resolwe, sign_in=None, settings=PAIRED):
+        sign_in = sign_in or MagicMock(return_value="session")
+        with (
+            patch.object(auth.Auth0Settings, "from_env", return_value=settings),
+            patch.object(auth, "sign_in", sign_in),
+        ):
+            Resolwe._login_with_password(resolwe, "u@example.com", "pw")
+        return sign_in
+
+    def test_uses_auth0_on_the_tenants_server(self):
+        resolwe = self._resolwe(accepted=True)
+        sign_in = self._login(resolwe)
+        sign_in.assert_called_once_with(
+            self.PAIRED, username="u@example.com", password="pw"
+        )
+        resolwe._login.assert_called_once_with(token="session")
+
+    def test_other_servers_never_send_the_password_to_auth0(self):
+        for url in (
+            "https://customer.example",
+            "http://localhost:8000",
+            "http://app.example",
+            "https://app.example:8443",
+        ):
+            resolwe = self._resolwe(accepted=True, url=url)
+            sign_in = self._login(resolwe)
+            sign_in.assert_not_called()
+            resolwe._login.assert_called_once_with(
+                username="u@example.com", password="pw"
+            )
+
+    def test_tenant_without_an_application_uses_the_server_login(self):
+        resolwe = self._resolwe(accepted=True)
+        with patch.object(
+            auth.Auth0Settings, "from_env", side_effect=ValueError("not available")
+        ):
+            with patch.object(auth, "sign_in") as sign_in:
+                Resolwe._login_with_password(resolwe, "u@example.com", "pw")
+        sign_in.assert_not_called()
+        resolwe._login.assert_called_once_with(username="u@example.com", password="pw")
+
+    def test_falls_back_when_the_server_rejects_the_token(self):
+        resolwe = self._resolwe(accepted=False)
+        self._login(resolwe)
+        self.assertEqual(
+            resolwe._login.call_args_list[-1].kwargs,
+            {"username": "u@example.com", "password": "pw"},
+        )
+        resolwe.logger.warning.assert_called_once()
+
+    def test_falls_back_when_auth0_refuses(self):
+        resolwe = self._resolwe(accepted=True)
+        self._login(resolwe, sign_in=MagicMock(side_effect=RuntimeError("refused")))
+        resolwe._login.assert_called_once_with(username="u@example.com", password="pw")
+        resolwe.logger.warning.assert_called_once()
+
+
+class TestTenantServers(unittest.TestCase):
+    def test_each_tenant_serves_its_own_server(self):
+        production = {**auth.TENANTS["production"], "client_id": "p"}
+        with patch.dict(auth.TENANTS, {"production": production}):
+            self.assertTrue(
+                auth.Auth0Settings.for_tenant("production").serves(
+                    "https://app.genialis.com"
+                )
+            )
+        test = auth.Auth0Settings.for_tenant("test")
+        self.assertTrue(test.serves("https://qa.genialis.io/"))
+        self.assertFalse(test.serves("https://app.genialis.com"))
 
 
 class TestChoosingTheSignIn(unittest.TestCase):
@@ -567,9 +700,7 @@ class TestLogin(unittest.TestCase):
             patch.object(auth.webbrowser, "open", open_browser),
             patch.object(auth.requests, "post", return_value=token_response) as post,
         ):
-            body = auth._browser_sign_in(
-                auth.Auth0Settings(domain="example.auth0.com", client_id="cid")
-            )
+            body = auth._browser_sign_in(SETTINGS)
         threads[0].join(timeout=5)
 
         self.assertEqual(body["access_token"], "tok")
@@ -620,9 +751,7 @@ class TestLogin(unittest.TestCase):
                 patch.object(auth.webbrowser, "open", open_browser),
                 patch.object(auth.requests, "post", return_value=token_response),
             ):
-                body = auth._browser_sign_in(
-                    auth.Auth0Settings(domain="example.auth0.com", client_id="cid")
-                )
+                body = auth._browser_sign_in(SETTINGS)
                 self.assertEqual(body["access_token"], "tok")
         finally:
             done.set()

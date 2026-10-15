@@ -136,10 +136,11 @@ class TestResolwe(unittest.TestCase):
         rep = Resolwe.__repr__(resolwe_mock)
         self.assertEqual(rep, "Resolwe <url: www.abc.com>")
 
+    @patch("resdk.resolwe.auth.sign_in", side_effect=RuntimeError("no Auth0"))
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.ResAuth")
     @patch("resdk.resolwe._CredentialSafeSession")
-    def test_env_variables(self, session_mock, resauth_mock, requests_mock):
+    def test_env_variables(self, session_mock, resauth_mock, requests_mock, sign_in):
         # Ensure environmental variables are not set.
         os.environ.pop("RESOLWE_HOST_URL", None)
         os.environ.pop("RESOLWE_API_USERNAME", None)
@@ -161,10 +162,13 @@ class TestResolwe(unittest.TestCase):
         self.assertEqual(resauth_mock.call_args[0][1], "bar")
 
     @patch.dict(os.environ, {"RESDK_TOKEN": "env-token"}, clear=True)
+    @patch("resdk.resolwe.auth.sign_in", side_effect=RuntimeError("no Auth0"))
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.ResAuth")
     @patch("resdk.resolwe._CredentialSafeSession")
-    def test_env_token_precedence(self, session_mock, resauth_mock, requests_mock):
+    def test_env_token_precedence(
+        self, session_mock, resauth_mock, requests_mock, sign_in
+    ):
         # The environment token is used when there are no credentials, or only
         # a username.
         Resolwe()

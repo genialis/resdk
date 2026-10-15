@@ -12,7 +12,8 @@ short-lived HTTP server on ``127.0.0.1``, and the authorization code is
 exchanged for an access token. Without one, for example over SSH or on a
 remote Jupyter server, it uses the Device Authorization Flow (RFC 8628): it
 prints an address and a short code, the user approves the sign-in on any
-device, and Auth0 hands the token over.
+device, and Auth0 hands the token over. Scripts and CI jobs with a username and
+password sign in with the password grant, which needs no person.
 The token is kept in memory only (never written to disk) and is sent to the
 Resolwe server as ``Authorization: Bearer <token>`` by
 :class:`resdk.resolwe.ResAuth`.
@@ -54,9 +55,11 @@ import time
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
+
+from .utils import url_origin
 
 #: Environment variable holding a pre-obtained access token.
 TOKEN_ENV_VAR = "RESDK_TOKEN"
@@ -64,21 +67,27 @@ TOKEN_ENV_VAR = "RESDK_TOKEN"
 TENANT_ENV_VAR = "RESDK_AUTH0_TENANT"
 DEFAULT_TENANT = "production"
 
-#: The Auth0 tenants: their domain and the client ID of their Native
-#: application. The client IDs are public; a Native application has no secret.
+#: The Auth0 tenants: their domain, the client ID of their Native application,
+#: the identifier of their API (the audience of the tokens) and the Resolwe
+#: servers whose users they sign in. The client IDs are public; a Native
+#: application has no secret.
 TENANTS = {
-    # Used by app.genialis.com. Its application is created when the production
-    # tenant is set up (REID-3054); until then, sign-in reports that it is
-    # missing.
-    "production": {"domain": "genialis.us.auth0.com", "client_id": None},
-    # Used by qa.genialis.io.
+    # Its application is created when the production tenant is set up; until
+    # then, sign-in reports that it is missing.
+    "production": {
+        "domain": "genialis.us.auth0.com",
+        "client_id": None,
+        "audience": "https://api.genialis.com",
+        "servers": ("app.genialis.com",),
+    },
     "test": {
         "domain": "genialis-test.eu.auth0.com",
         "client_id": "JbYl1IfXfr2MlAqHnr9MR4YBziiCytIh",
+        "audience": "https://api.genialis.io",
+        "servers": ("qa.genialis.io",),
     },
 }
 
-DEFAULT_AUDIENCE = "https://api.genialis.com"
 #: ``expressions:api`` is the scope the Resolwe server requires, and the
 #: supermodel scopes let the same token score with gpm; Auth0 drops the scopes
 #: the user does not hold. ``offline_access`` asks for a refresh token.
@@ -118,8 +127,16 @@ class Auth0Settings:
 
     domain: str
     client_id: str
-    audience: str = DEFAULT_AUDIENCE
+    audience: str
     scope: str = DEFAULT_SCOPE
+    #: Hosts of the Resolwe servers whose users this tenant signs in.
+    servers: Tuple[str, ...] = ()
+
+    def serves(self, url: str) -> bool:
+        """Return whether ``url`` is one of this tenant's servers, over HTTPS."""
+        return url_origin(url) in {
+            url_origin(f"https://{host}") for host in self.servers
+        }
 
     @classmethod
     def for_tenant(cls, name: str = DEFAULT_TENANT) -> "Auth0Settings":
@@ -139,7 +156,12 @@ class Auth0Settings:
                 "it has no application for ReSDK. Put an access token in "
                 f"{TOKEN_ENV_VAR} instead."
             )
-        return cls(domain=tenant["domain"], client_id=tenant["client_id"])
+        return cls(
+            domain=tenant["domain"],
+            client_id=tenant["client_id"],
+            audience=tenant["audience"],
+            servers=tuple(tenant["servers"]),
+        )
 
     @classmethod
     def from_env(cls) -> "Auth0Settings":
@@ -326,20 +348,33 @@ def _token_body(response: requests.Response) -> dict:
 
 
 def sign_in(
-    settings: Optional[Auth0Settings] = None, *, device: Optional[bool] = None
+    settings: Optional[Auth0Settings] = None,
+    *,
+    device: Optional[bool] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> Auth0Session:
     """Sign in to Auth0 and return a session that renews its access token.
 
-    The token in :data:`TOKEN_ENV_VAR` is used if set, without renewal;
-    otherwise the user signs in. Nothing is written to disk, so every new
-    process signs in again.
+    With a username and password, Auth0 checks them directly (the password
+    grant); this needs no person, so scripts and CI jobs can sign in. It works
+    for accounts with an Auth0 password and without MFA. Otherwise the token
+    in :data:`TOKEN_ENV_VAR` is used if set, without renewal, or the user
+    signs in. Nothing is written to disk, so every new process signs in again.
 
     :param settings: Auth0 settings; read from :data:`TENANT_ENV_VAR` when
         omitted.
     :param device: ``True`` to sign in with the Device Authorization Flow,
         ``False`` to use the browser on this machine. By default the device
         flow is used when this machine has no browser to open.
+    :param username: the user's email, for the password grant
+    :param password: the user's password, for the password grant
     """
+    if username and password:
+        if settings is None:
+            settings = Auth0Settings.from_env()
+        body = _password_sign_in(settings, username, password)
+        return Auth0Session.from_token_response(body, settings)
     token = token_from_env()
     if token:
         return Auth0Session(token)
@@ -349,6 +384,37 @@ def sign_in(
         device = not _browser_available()
     body = _device_sign_in(settings) if device else _browser_sign_in(settings)
     return Auth0Session.from_token_response(body, settings)
+
+
+def _password_sign_in(settings: Auth0Settings, username: str, password: str) -> dict:
+    """Sign in with a username and password; return Auth0's token response.
+
+    The password goes only to Auth0. Auth0's brute-force protection applies.
+
+    :raises RuntimeError: if Auth0 refuses the credentials or the grant.
+    """
+    response = requests.post(
+        f"https://{settings.domain}/oauth/token",
+        data={
+            "grant_type": "password",
+            "username": username,
+            "password": password,
+            "client_id": settings.client_id,
+            "audience": settings.audience,
+            "scope": settings.scope,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        try:
+            error = response.json()
+        except ValueError:
+            error = {}
+        reason = (
+            error.get("error_description") or error.get("error") or response.status_code
+        )
+        raise RuntimeError(f"Auth0 refused the username and password: {reason}")
+    return _token_body(response)
 
 
 def _browser_available() -> bool:
