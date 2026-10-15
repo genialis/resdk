@@ -250,7 +250,10 @@ class Resolwe:
         # Check minimal supported version.
         self.version_check()
 
-        self._login(username=username, password=password, token=token)
+        if token is None and username and password:
+            self._login_with_password(username, password)
+        else:
+            self._login(username=username, password=password, token=token)
 
     def version_check(self):
         """Check that the server is compatible with the client."""
@@ -341,7 +344,45 @@ class Resolwe:
         """
         if username is not None and password is None:
             password = getpass.getpass("Password: ")
-        self._login(username=username, password=password, interactive=True)
+        if username and password:
+            self._login_with_password(username, password)
+        else:
+            self._login(username=username, password=password, interactive=True)
+
+    def _login_with_password(self, username: str, password: str):
+        """Sign in with a username and password, through Auth0 if possible.
+
+        The password goes to Auth0 only when this server is the one the
+        selected tenant serves (``RESDK_AUTH0_TENANT``): app.genialis.com for
+        ``production``, qa.genialis.io for ``test``. Auth0 then checks it and
+        issues tokens, which are renewed in memory. Any other server, such as a
+        local or customer one, gets the password directly, so failed attempts
+        never count against Auth0's brute-force protection.
+
+        If Auth0 refuses, or the server does not accept its token (because
+        bearer authentication is not enabled there yet), the old password login
+        of the Resolwe server is used instead.
+        """
+        try:
+            settings = auth.Auth0Settings.from_env()
+        except ValueError as error:
+            self.logger.info("Not signing in through Auth0: %s", error)
+            settings = None
+        if settings is not None and settings.serves(self.url):
+            try:
+                session = auth.sign_in(settings, username=username, password=password)
+            except (RuntimeError, RequestException) as error:
+                self.logger.warning(
+                    "Auth0 sign-in failed (%s); using the server login.", error
+                )
+            else:
+                self._login(token=session)
+                if self.auth.username is not None:
+                    return
+                self.logger.warning(
+                    "The server did not accept the Auth0 token; using the server login."
+                )
+        self._login(username=username, password=password)
 
     def login_with_token(self, token: str):
         """Authenticate with a bearer token (an Auth0 access token).
