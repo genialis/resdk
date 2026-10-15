@@ -68,7 +68,7 @@ from .resources.base import BaseResource
 from .resources.fields import DataSource
 from .resources.kb import Feature, Mapping
 from .resources.utils import get_collection_id, get_data_id, is_data, iterate_fields
-from .utils import md5
+from .utils import is_credential_origin, md5, url_origin
 
 DEFAULT_URL = "http://localhost:8000"
 AUTOMATIC_LOGIN_POSTFIX = "saml-auth/api-login/"
@@ -107,6 +107,31 @@ class ResolweAPI(slumber.API):
     """Use custom ResolweResource resource class in slumber's API."""
 
     resource_class = ResolweResource
+
+
+class _CredentialSafeSession(requests.Session):
+    """A session that sends credentials on redirect only to the Resolwe origin.
+
+    ``requests`` drops the ``Authorization`` header when a redirect crosses to a
+    different host, but it re-sends cookies and leaves custom headers in place.
+    Downloads redirect to pre-signed storage URLs on a different host, so also
+    drop the session cookies and the ``X-CSRFToken`` header there.
+
+    Every redirect hop is compared with the Resolwe origin (scheme, host and
+    port), not with the previous hop: ``requests`` adds the cookies again on
+    each hop, so a second redirect within the storage host would otherwise get
+    them back. Only an http-to-https upgrade of the Resolwe origin keeps them.
+    """
+
+    #: Origin of the Resolwe server, set by :class:`Resolwe`.
+    credential_origin = None
+
+    def rebuild_auth(self, prepared_request, response):
+        """Strip cookies and the CSRF header on a redirect away from Resolwe."""
+        super().rebuild_auth(prepared_request, response)
+        if not is_credential_origin(prepared_request.url, self.credential_origin):
+            prepared_request.headers.pop("Cookie", None)
+            prepared_request.headers.pop("X-CSRFToken", None)
 
 
 class Resolwe:
@@ -199,13 +224,14 @@ class Resolwe:
     ):
         """Initialize attributes."""
         self.logger = logging.getLogger(__name__)
-        self.session = requests.Session()
+        self.session = _CredentialSafeSession()
         self.uploader = Uploader(self)
         if url is None:
             # Try to get URL from environmental variable, otherwise fallback to default.
             url = os.environ.get("RESOLWE_HOST_URL", DEFAULT_URL)
 
         self._validate_url(url)
+        self.session.credential_origin = url_origin(url)
 
         if username is None:
             username = os.environ.get("RESOLWE_API_USERNAME", None)

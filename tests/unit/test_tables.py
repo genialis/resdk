@@ -3,14 +3,18 @@ from datetime import datetime
 from io import StringIO
 from time import sleep, time
 
+import aiohttp
 import numpy as np
 import pandas as pd
 import pytz
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from mock import MagicMock, NonCallableMagicMock, PropertyMock, patch
 from pandas.testing import assert_frame_equal
 
 from resdk.resources import AnnotationField, AnnotationValue, Sample
 from resdk.tables import RNATables
+from resdk.tables.base import BaseTables
 from resdk.tables.qc import (
     _mate_file_groups,
     general_multiqc_parser,
@@ -487,6 +491,119 @@ class TestTables(unittest.TestCase):
             feature_id__in=["ENSG001", "ENSG002", "ENSG003"],
         )
         self.assertDictEqual(mapping, self.gene_map)
+
+
+class TestRequestAuth(unittest.TestCase):
+    def setUp(self):
+        self.tables = MagicMock()
+        self.tables.resolwe.url = "https://Genialis.example:443"
+        self.tables.resolwe.auth = MagicMock(token="token", cookies={"a": "b"})
+
+    def test_credentials_for_resolwe_host(self):
+        headers, cookies = BaseTables._request_auth(
+            self.tables, "https://genialis.example/data/1/file"
+        )
+        self.assertEqual(headers, {"Authorization": "Bearer token"})
+        self.assertEqual(cookies, {"a": "b"})
+
+    def test_no_credentials_for_other_origins(self):
+        for url in (
+            "https://storage.example/signed",
+            "http://genialis.example/data/1/file",
+            "https://genialis.example:8443/data/1/file",
+        ):
+            self.assertEqual(BaseTables._request_auth(self.tables, url), ({}, {}))
+
+    def test_credentials_for_https_upgrade(self):
+        self.tables.resolwe.url = "http://genialis.example"
+        headers, _ = BaseTables._request_auth(self.tables, "https://genialis.example/f")
+        self.assertEqual(headers, {"Authorization": "Bearer token"})
+
+
+class TestFetch(unittest.IsolatedAsyncioTestCase):
+    async def test_credentials_only_on_resolwe_hops(self):
+        """A redirect chain to storage gets no credentials on any storage hop."""
+        seen = []
+
+        def handler(target):
+            async def handle(request):
+                seen.append(
+                    (
+                        request.host,
+                        request.path,
+                        request.headers.get("Cookie"),
+                        request.headers.get("Authorization"),
+                    )
+                )
+                if target:
+                    # A cookie set on the way must not reach the next host.
+                    raise web.HTTPFound(
+                        target(request), headers={"Set-Cookie": "csrftoken=new"}
+                    )
+                return web.Response(body=b"content")
+
+            return handle
+
+        storage_app = web.Application()
+        storage_app.router.add_get("/signed", handler(lambda r: "/final"))
+        storage_app.router.add_get("/final", handler(None))
+        # localhost, not 127.0.0.1: aiohttp stores no cookies for IP hosts.
+        storage = TestServer(storage_app, host="localhost")
+        await storage.start_server()
+        self.addAsyncCleanup(storage.close)
+
+        resolwe_app = web.Application()
+        resolwe_app.router.add_get(
+            "/data/1/file", handler(lambda r: str(storage.make_url("/signed")))
+        )
+        resolwe = TestServer(resolwe_app, host="localhost")
+        await resolwe.start_server()
+        self.addAsyncCleanup(resolwe.close)
+
+        tables = MagicMock()
+        tables.resolwe.url = str(resolwe.make_url("/"))
+        tables.resolwe.auth = MagicMock(token="token", cookies={"sessionid": "s"})
+        tables._request_auth = lambda url: BaseTables._request_auth(tables, url)
+
+        async with BaseTables._download_session() as session:
+            content = await BaseTables._fetch(
+                tables, session, str(resolwe.make_url("/data/1/file"))
+            )
+
+        self.assertEqual(content, b"content")
+        self.assertEqual(
+            [path for _, path, _, _ in seen], ["/data/1/file", "/signed", "/final"]
+        )
+        self.assertEqual(seen[0][2:], ("sessionid=s", "Bearer token"))
+        for _, _, cookie, authorization in seen[1:]:
+            self.assertIsNone(cookie)
+            self.assertIsNone(authorization)
+
+    async def test_error_does_not_show_credentials(self):
+        """A failed download raises an error without the request headers."""
+        app = web.Application()
+        app.router.add_get("/data/1/file", lambda request: web.Response(status=401))
+        server = TestServer(app, host="localhost")
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+
+        tables = MagicMock()
+        tables.resolwe.url = str(server.make_url("/"))
+        tables.resolwe.auth = MagicMock(
+            token="secret-token", cookies={"sessionid": "s"}
+        )
+        tables._request_auth = lambda url: BaseTables._request_auth(tables, url)
+        tables._download_error = BaseTables._download_error
+
+        async with BaseTables._download_session() as session:
+            with self.assertRaises(aiohttp.ClientResponseError) as raised:
+                await BaseTables._fetch(
+                    tables, session, str(server.make_url("/data/1/file"))
+                )
+
+        self.assertEqual(raised.exception.status, 401)
+        self.assertNotIn("secret-token", repr(raised.exception))
+        self.assertNotIn("sessionid", repr(raised.exception))
 
 
 class TestMateFileGroups(unittest.TestCase):
