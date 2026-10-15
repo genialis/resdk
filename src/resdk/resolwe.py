@@ -15,13 +15,14 @@ import logging
 import ntpath
 import os
 import re
+import sys
 import time
 import webbrowser
 from collections import defaultdict
 from contextlib import suppress
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Iterable, Optional, TypedDict, Union
+from typing import Dict, Iterable, Optional, TypedDict, Union
 from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
@@ -31,6 +32,7 @@ from packaging import version
 
 from resdk.uploader import Uploader
 
+from . import auth
 from .constants import CHUNK_SIZE
 from .exceptions import ResolweServerError, ValidationError, handle_http_exception
 from .query import (
@@ -110,12 +112,21 @@ class ResolweAPI(slumber.API):
 class Resolwe:
     """Connect to a Resolwe server.
 
+    Credentials can be passed here, read from the environment
+    (``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD``, or ``RESDK_TOKEN``)
+    or supplied later with :meth:`login`, :meth:`login_with_token` or
+    :meth:`login_with_auth0`. Without credentials the connection is anonymous.
+    A ``token`` argument takes precedence over a username and password.
+    ``RESDK_TOKEN`` is used unless both a username and a password are given.
+
     :param username: user's email
     :type username: str
     :param password: user's password
     :type password: str
     :param url: Resolwe server instance
     :type url: str
+    :param token: Auth0 access token, sent as ``Authorization: Bearer``
+    :type token: str
 
     """
 
@@ -184,6 +195,7 @@ class Resolwe:
         username: Optional[str] = None,
         password: Optional[str] = None,
         url: Optional[str] = None,
+        token: Optional[str] = None,
     ):
         """Initialize attributes."""
         self.logger = logging.getLogger(__name__)
@@ -201,12 +213,17 @@ class Resolwe:
         if password is None:
             password = os.environ.get("RESOLWE_API_PASSWORD", None)
 
+        if token is None and not (username and password):
+            # Use the token from the environment unless a full username and
+            # password pair was given.
+            token = auth.token_from_env()
+
         self.url = url
 
         # Check minimal supported version.
         self.version_check()
 
-        self._login(username=username, password=password)
+        self._login(username=username, password=password, token=token)
 
     def version_check(self):
         """Check that the server is compatible with the client."""
@@ -268,8 +285,11 @@ class Resolwe:
         username: Optional[str] = None,
         password: Optional[str] = None,
         interactive: bool = False,
+        token: Optional[str] = None,
     ):
-        self.auth = ResAuth(username, password, self.url, interactive=interactive)
+        self.auth = ResAuth(
+            username, password, self.url, interactive=interactive, token=token
+        )
         self.session.cookies = requests.utils.cookiejar_from_dict(self.auth.cookies)
         self.api = ResolweAPI(
             urljoin(self.url, "/api/"),
@@ -295,6 +315,35 @@ class Resolwe:
         if username is not None and password is None:
             password = getpass.getpass("Password: ")
         self._login(username=username, password=password, interactive=True)
+
+    def login_with_token(self, token: str):
+        """Authenticate with a bearer token (an Auth0 access token).
+
+        :param token: the access token to send as ``Authorization: Bearer``.
+        """
+        self._login(token=token)
+
+    def login_with_auth0(self, settings: Optional[auth.Auth0Settings] = None):
+        """Sign in through Auth0 in the browser and use the resulting token.
+
+        If ``RESDK_TOKEN`` is set, that token is used and no browser is opened
+        (for machines without a browser). The token is kept in memory only.
+
+        :param settings: Auth0 settings; read from ``RESDK_AUTH0_TENANT``
+            environment variables when omitted.
+        """
+        self._login(token=auth.get_access_token(settings))
+        # Another user on the same machine can see the sign-in URL and complete
+        # it with their own account, so show which account was signed in.
+        if self.auth.username:
+            message = f"Signed in to Resolwe as {self.auth.username}."
+        else:
+            # The lookup fails when the server rejects the token.
+            message = (
+                "Got an Auth0 token, but Resolwe did not identify the account: "
+                "the token may not be valid for this server."
+            )
+        print(message, file=sys.stderr)
 
     def get_query_by_resource(self, resource: type[BaseResource]) -> ResolweQuery:
         """Get ResolweQuery for a given resource.
@@ -650,15 +699,25 @@ class AuthCookie(TypedDict):
 class ResAuth(requests.auth.AuthBase):
     """HTTP Resolwe Authentication for Request object.
 
+    Authenticates with either
+
+    * a Django session (``sessionid``/``csrftoken`` cookies), obtained with a
+      username and password or with the interactive browser login, or
+    * an Auth0 bearer token, sent as the ``Authorization`` header. When a
+      ``token`` is given, username and password are ignored and no cookies
+      are used.
+
     :param str username: user's email
     :param str password: user's password
     :param str url: Resolwe server address
-    :param str cookies: user's sessionid and csrftoken cookies
+    :param str token: Auth0 access token to send as a bearer credential
 
     """
 
-    #: Dictionary of authentication cookes.
-    cookies: AuthCookie = {"csrftoken": "", "sessionid": ""}
+    #: Authentication cookies. Empty in bearer-token mode.
+    cookies: Dict[str, str] = {"csrftoken": "", "sessionid": ""}
+    #: Auth0 bearer token, when bearer authentication is used.
+    token: Optional[str] = None
 
     def __init__(
         self,
@@ -666,13 +725,32 @@ class ResAuth(requests.auth.AuthBase):
         password: Optional[str] = None,
         url: str = DEFAULT_URL,
         interactive: bool = False,
+        token: Optional[str] = None,
     ):
-        """Authenticate user on Resolwe server."""
+        """Authenticate user on Resolwe server.
+
+        :raises ValueError: if ``token`` is empty or contains whitespace or
+            control characters.
+        """
+        if token is not None:
+            # A malformed token would fail every request with an unclear error.
+            token = token.strip()
+            if not token:
+                raise ValueError("The token is empty.")
+            if any(char.isspace() or not char.isprintable() for char in token):
+                raise ValueError("The token contains whitespace or control characters.")
         self.logger = logging.getLogger(__name__)
         self.username = username
         self.url = url
+        self.token = token
         self.automatic_login_url = urljoin(self.url, AUTOMATIC_LOGIN_POSTFIX)
         self.interactive_login_url = urljoin(self.url, INTERACTIVE_LOGIN_POSTFIX)
+
+        if token is not None:
+            # Bearer authentication: no cookies are used.
+            self.cookies = {}
+            self.logger.info("Using bearer token authentication.")
+            return
 
         if not interactive and (username is None or password is None):
             # Anonymous authentication
@@ -762,7 +840,10 @@ Alternatively, you may visit the following URL which will autofill the code upon
 
     def __call__(self, request: requests.Request) -> requests.Request:
         """Set request headers."""
-        if "csrftoken" in self.cookies:
+        if self.token is not None:
+            # Bearer authentication: no cookie or CSRF header is needed.
+            request.headers["Authorization"] = f"Bearer {self.token}"
+        elif "csrftoken" in self.cookies:
             request.headers["X-CSRFToken"] = self.cookies["csrftoken"]
 
         request.headers["referer"] = self.url
