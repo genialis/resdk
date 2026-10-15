@@ -26,13 +26,17 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 import pandas as pd
 import pytz
+from multidict import CIMultiDict, CIMultiDictProxy
 from tqdm import tqdm
 
 from resdk.resources import Collection, Data, Sample
+from resdk.utils import is_credential_origin, url_origin
 from resdk.utils.table_cache import cache_dir_resdk, load_pickle, save_pickle
 
 # See _download_data function for in-depth explanation of this.
 EXP_ASYNC_CHUNK_SIZE = 50
+#: Redirects a table download follows, e.g. to a pre-signed storage URL.
+MAX_DOWNLOAD_REDIRECTS = 10
 
 
 class TqdmWithCallable(tqdm):
@@ -512,14 +516,73 @@ class BaseTables(abc.ABC):
         """Parse file object and return a one DataFrame line."""
         pass
 
+    def _request_auth(self, url):
+        """Return (headers, cookies) to send with a download request.
+
+        Credentials go only to the Resolwe origin. Pre-signed storage URLs (for
+        example S3) carry their own signature, so they get neither the session
+        cookie nor the bearer token.
+        """
+        if not is_credential_origin(url, url_origin(self.resolwe.url)):
+            return {}, {}
+        auth = self.resolwe.auth
+        headers = {}
+        if getattr(auth, "token", None):
+            headers["Authorization"] = f"Bearer {auth.token}"
+        return headers, dict(auth.cookies)
+
+    @staticmethod
+    def _download_session():
+        """Return an aiohttp session for downloads, without a cookie jar.
+
+        Credentials are attached per request by _fetch. A cookie jar would
+        store cookies set by any hop and send them on to the next one.
+        """
+        return aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+
+    @staticmethod
+    def _download_error(response):
+        """Return the error for a failed download, without the request headers.
+
+        aiohttp's own error includes the request headers, which hold the bearer
+        token and session cookie, and prints them in its repr.
+        """
+        request_info = aiohttp.RequestInfo(
+            response.url, response.method, CIMultiDictProxy(CIMultiDict())
+        )
+        return aiohttp.ClientResponseError(
+            request_info,
+            (),
+            status=response.status,
+            message=response.reason or "",
+        )
+
+    async def _fetch(self, session, url):
+        """Download a URL and return its content.
+
+        Redirects are followed here, not by aiohttp, so that credentials are
+        sent on each hop only if it is on the Resolwe origin. Older aiohttp
+        versions re-send per-request cookies to a redirect's new host.
+        """
+        for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
+            headers, cookies = self._request_auth(url)
+            async with session.get(
+                url, headers=headers, cookies=cookies, allow_redirects=False
+            ) as response:
+                location = response.headers.get("Location")
+                if response.status in (301, 302, 303, 307, 308) and location:
+                    url = urljoin(str(response.url), location)
+                    continue
+                if not response.ok:
+                    raise self._download_error(response)
+                return await response.content.read()
+        # The URL may carry a storage signature, so keep it out of the message.
+        raise RuntimeError("Too many redirects while downloading a file.")
+
     async def _download_file(self, url, session, sample_id, data_type):
-        async with session.get(url) as response:
-            response.raise_for_status()
-            with BytesIO() as f:
-                f.write(await response.content.read())
-                f.seek(0)
-                sample_data = self._parse_file(f, sample_id, data_type)
-        return sample_data
+        content = await self._fetch(session, url)
+        with BytesIO(content) as f:
+            return self._parse_file(f, sample_id, data_type)
 
     async def _download_data(self, data_type: str) -> pd.DataFrame:
         """Download data files and merge them into a pandas DataFrame.
@@ -558,9 +621,9 @@ class BaseTables(abc.ABC):
             source_urls = self._get_data_urls(uri_to_id.keys())
             urls_ids = [(url, uri_to_id[uri]) for uri, url in source_urls.items()]
 
-            async with aiohttp.ClientSession(
-                cookies=self.resolwe.auth.cookies
-            ) as session:
+            # Credentials are attached per request in _fetch, and only for the
+            # Resolwe origin (see _request_auth).
+            async with self._download_session() as session:
                 futures = [
                     self._download_file(url, session, id_, data_type)
                     for url, id_ in urls_ids

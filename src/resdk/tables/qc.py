@@ -659,10 +659,7 @@ class QCTables(BaseTables):
         if report_file not in self._shared_files:
             return await super()._download_file(url, session, sample_id, data_type)
 
-        async with session.get(url) as response:
-            response.raise_for_status()
-            content = await response.content.read()
-
+        content = await self._fetch(session, url)
         self._raw_reports[report_file][sample_id] = content
         with BytesIO(content) as f:
             return self._parse_file(f, sample_id, data_type)
