@@ -11,6 +11,22 @@ Unreleased
 Added
 -----
 - Add support for ``Python 3.15``
+- Add Auth0 bearer-token authentication. ``Resolwe`` accepts a ``token``
+  argument (or reads it from the ``RESDK_TOKEN`` environment variable) and
+  sends it as an ``Authorization: Bearer`` header; ``login_with_token()`` sets
+  it on an existing connection
+- Add ``login_with_auth0()``, which signs in through Auth0 in the browser
+  (Authorization Code flow with PKCE) or, without a browser, with the Device
+  Authorization Flow. ``RESDK_AUTH0_TENANT`` selects the tenant:
+  ``production`` (default) or ``test``
+- Renew Auth0 access tokens in memory with a refresh token, before they
+  expire and once after a 401, for up to 7 days
+- Sign in with ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` through
+  Auth0's password grant on the server of the selected tenant
+  (app.genialis.com or qa.genialis.io). Other servers, and servers that do
+  not accept Auth0 tokens yet, use the server's password login
+- Add ``resdk.auth.sign_in()``, which returns a renewed token for packages
+  that do not connect to Resolwe
 - Add the ``skip_existing`` argument to the ``download`` methods of ``Data``,
   ``Sample`` and ``Collection`` objects. When set to ``True``, files that are
   already present in the download directory and match the md5 checksum of the
@@ -37,6 +53,12 @@ Changed
   warns on pandas 2.2 and later, and the percentage columns of the MACS2
   prepeak QC table are converted under pandas 3 as well. The output on
   pandas 2 is unchanged
+- Send credentials only to the Resolwe server's origin (scheme, host and
+  port), on every redirect hop. An upgrade from ``http`` on port 80 to
+  ``https`` on port 443 of the same host keeps them. File downloads redirect to pre-signed storage URLs, so
+  the bearer token, session cookies and CSRF header no longer reach storage.
+  Table and QC file downloads now also send the bearer token, not only the
+  session cookies
 - Change the parsing logic for the one-to-one metadata table
   in ``BaseTables`` class so it does not fail when the table
   index does not reflect the state of samples in the collection

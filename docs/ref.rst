@@ -6,6 +6,8 @@ SDK Reference
 
 .. automodule:: resdk.resolwe
 
+.. automodule:: resdk.auth
+
 .. automodule:: resdk.query
 
 .. automodule:: resdk.resources
