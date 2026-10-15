@@ -520,6 +520,29 @@ class TestRequestAuth(unittest.TestCase):
         self.assertEqual(headers, {"Authorization": "Bearer token"})
 
 
+class TestTokenRenewalBeforeDownload(unittest.TestCase):
+    @patch("resdk.tables.base.save_pickle")
+    @patch("resdk.tables.base.load_pickle", return_value=None)
+    def test_token_is_renewed_before_the_event_loop_starts(self, load, save):
+        calls = []
+
+        class Auth:
+            @property
+            def token(self):
+                calls.append("token")
+                return "a1"
+
+        tables = MagicMock(META="meta")
+        tables.resolwe.auth = Auth()
+        with patch(
+            "resdk.tables.base.asyncio.run",
+            side_effect=lambda coro: calls.append("run"),
+        ) as run:
+            BaseTables._load_fetch(tables, "exp")
+        self.assertEqual(calls, ["token", "run"])
+        run.call_args.args[0].close()
+
+
 class TestFetch(unittest.IsolatedAsyncioTestCase):
     async def test_credentials_only_on_resolwe_hops(self):
         """A redirect chain to storage gets no credentials on any storage hop."""
