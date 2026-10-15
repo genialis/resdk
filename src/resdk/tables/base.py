@@ -287,6 +287,9 @@ class BaseTables(abc.ABC):
             if data_type == self.META:
                 data = self._download_metadata()
             else:
+                # Renew the access token now, if it is about to expire, so the
+                # downloads below do not wait for Auth0 inside the event loop.
+                getattr(self.resolwe.auth, "token", None)
                 data = asyncio.run(self._download_data(data_type))
 
             save_pickle(data, self._cache_file(data_type))

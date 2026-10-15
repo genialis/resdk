@@ -16,6 +16,19 @@ Resolwe server as ``Authorization: Bearer <token>`` by
 A token obtained elsewhere can be put in the ``RESDK_TOKEN`` environment
 variable; ReSDK then signs nobody in.
 
+Other packages, such as gpm, get a token that renews itself without
+connecting to Resolwe::
+
+    from resdk import auth
+
+    session = auth.sign_in()
+    headers = {"Authorization": f"Bearer {session.access_token}"}
+
+.. autofunction:: resdk.auth.sign_in
+
+.. autoclass:: resdk.auth.Auth0Session
+   :members: access_token, can_refresh, refresh_after_rejection
+
 .. autoclass:: resdk.auth.Auth0Settings
    :members:
 
@@ -28,9 +41,11 @@ variable; ReSDK then signs nobody in.
 import base64
 import hashlib
 import http.server
+import logging
 import os
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 import webbrowser
@@ -72,6 +87,8 @@ DEFAULT_SCOPE = (
 CALLBACK_PORT = 8484
 REDIRECT_URI = f"http://127.0.0.1:{CALLBACK_PORT}/callback"
 LOGIN_TIMEOUT_SECONDS = 300
+
+logger = logging.getLogger(__name__)
 
 
 class _CallbackServer(http.server.ThreadingHTTPServer):
@@ -141,24 +158,201 @@ def token_from_env() -> Optional[str]:
     return os.environ.get(TOKEN_ENV_VAR, "").strip() or None
 
 
-def get_access_token(settings: Optional[Auth0Settings] = None) -> str:
-    """Return an Auth0 access token.
+class Auth0Session:
+    """An Auth0 access token that renews itself before it expires.
 
-    The token from :data:`TOKEN_ENV_VAR` is used if set; otherwise the user is
-    signed in through the browser.
+    Holds the access token, the refresh token and the expiry in memory only.
+    :attr:`access_token` returns a token that is valid for at least
+    :attr:`REFRESH_MARGIN_SECONDS` more seconds, refreshing it at Auth0 when
+    needed. Auth0 rotates the refresh token on every use, and the session keeps
+    the new one. A token obtained elsewhere (``RESDK_TOKEN`` or
+    :meth:`resdk.Resolwe.login_with_token`) has no refresh token and is used as
+    it is until it expires.
 
-    :param settings: Auth0 settings; read from the environment when omitted.
+    The session is safe to share between threads: one lock guards the refresh,
+    so parallel requests share one refresh instead of each starting one.
+    """
+
+    #: Refresh this many seconds before the access token expires.
+    REFRESH_MARGIN_SECONDS = 60
+
+    def __init__(
+        self,
+        access_token: str,
+        *,
+        refresh_token: Optional[str] = None,
+        expires_in: Optional[float] = None,
+        settings: Optional[Auth0Settings] = None,
+    ):
+        """Hold a token, and the refresh token and settings to renew it."""
+        self._lock = threading.Lock()
+        self._access_token = access_token
+        self._refresh_token = refresh_token
+        # The token obtained by the last refresh after a rejection. If the
+        # server rejects that one too, the problem is not an expired token, so
+        # refreshing again would only spend refresh tokens.
+        self._renewed_after_rejection: Optional[str] = None
+        # Set when Auth0 says the refresh token is no longer valid.
+        self._renewal_ended = False
+        self._expires_at = self._expiry(expires_in)
+        self.settings = settings
+
+    @classmethod
+    def from_token_response(cls, body: dict, settings: Auth0Settings) -> "Auth0Session":
+        """Build a session from the JSON body of Auth0's token endpoint."""
+        return cls(
+            body["access_token"],
+            refresh_token=body.get("refresh_token"),
+            expires_in=body.get("expires_in"),
+            settings=settings,
+        )
+
+    @property
+    def can_refresh(self) -> bool:
+        """Whether the session holds a refresh token and the settings to use it."""
+        return bool(self._refresh_token and self.settings)
+
+    @property
+    def access_token(self) -> str:
+        """Return a valid access token, refreshing it first if it is about to expire.
+
+        A failed refresh is logged while the current token is still valid, so a
+        temporary Auth0 error does not fail the request.
+
+        :raises RuntimeError: if the token has expired and the refresh fails,
+            for example because the refresh token has expired; sign in again
+            then.
+        """
+        with self._lock:
+            if self._expires_at is None:
+                return self._access_token
+            now = time.monotonic()
+            if (
+                self.can_refresh
+                and now >= self._expires_at - self.REFRESH_MARGIN_SECONDS
+            ):
+                try:
+                    self._refresh()
+                except (RuntimeError, requests.RequestException) as error:
+                    if time.monotonic() >= self._expires_at:
+                        raise
+                    logger.warning(
+                        "The Auth0 access token could not be renewed; using the "
+                        "current one, which is valid for another %.0f s. %s",
+                        self._expires_at - time.monotonic(),
+                        error,
+                    )
+            elif self._renewal_ended and now >= self._expires_at:
+                raise RuntimeError("The Auth0 session has expired; sign in again.")
+            return self._access_token
+
+    def refresh_after_rejection(self, rejected: str) -> bool:
+        """Refresh once after the server rejected ``rejected``.
+
+        Refreshes only if ``rejected`` is still the current token; if another
+        thread has refreshed meanwhile, its token is used instead.
+
+        :return: whether a token other than ``rejected`` is now available.
+        """
+        with self._lock:
+            if self._access_token != rejected:
+                return True
+            if not self.can_refresh or rejected == self._renewed_after_rejection:
+                return False
+            self._refresh()
+            self._renewed_after_rejection = self._access_token
+            return self._access_token != rejected
+
+    def _refresh(self) -> None:
+        """Trade the refresh token for a new pair; the caller holds the lock."""
+        assert self.settings is not None and self._refresh_token is not None
+        response = requests.post(
+            f"https://{self.settings.domain}/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": self.settings.client_id,
+                "refresh_token": self._refresh_token,
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            try:
+                error = response.json().get("error")
+            except ValueError:
+                error = None
+            if response.status_code in (400, 401, 403) and error in PERMANENT_ERRORS:
+                # The refresh token is expired or revoked; asking again would
+                # fail the same way. A rate limit or server error (429, 5xx) is
+                # temporary, so the refresh token is kept for the next attempt.
+                self._refresh_token = None
+                self._renewal_ended = True
+            raise RuntimeError(
+                "The Auth0 session could not be renewed; sign in again. "
+                f"Auth0 answered: {response.text[:300]}"
+            )
+        body = _token_body(response)
+        self._access_token = body["access_token"]
+        # Rotation: the old refresh token is now spent, so keep the new one.
+        self._refresh_token = body.get("refresh_token", self._refresh_token)
+        self._expires_at = self._expiry(body.get("expires_in"))
+
+    @staticmethod
+    def _expiry(expires_in: Optional[float]) -> Optional[float]:
+        """Return the monotonic time at which a token of this lifetime expires."""
+        if expires_in is None:
+            return None
+        return time.monotonic() + float(expires_in)
+
+
+#: Errors from Auth0's token endpoint after which a refresh token is unusable.
+PERMANENT_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+
+def _token_body(response: requests.Response) -> dict:
+    """Return the JSON body of a token response that holds an access token.
+
+    :raises RuntimeError: if the request failed or no access token came back.
+    """
+    if not response.ok:
+        raise RuntimeError(f"Auth0 did not issue a token: {response.text[:300]}")
+    body = response.json()
+    if not body.get("access_token"):
+        raise RuntimeError(f"Auth0 response has no access_token: {response.text[:300]}")
+    return body
+
+
+def sign_in(settings: Optional[Auth0Settings] = None) -> Auth0Session:
+    """Sign in to Auth0 and return a session that renews its access token.
+
+    The token in :data:`TOKEN_ENV_VAR` is used if set, without renewal;
+    otherwise the user signs in through the browser. Nothing is written to
+    disk, so every new process signs in again.
+
+    :param settings: Auth0 settings; read from :data:`TENANT_ENV_VAR` when
+        omitted.
     """
     token = token_from_env()
     if token:
-        return token
+        return Auth0Session(token)
     if settings is None:
         settings = Auth0Settings.from_env()
-    return _login(settings)
+    return Auth0Session.from_token_response(_browser_sign_in(settings), settings)
 
 
-def _login(settings: Auth0Settings) -> str:
-    """Sign the user in through the browser and return the access token."""
+def get_access_token(settings: Optional[Auth0Settings] = None) -> str:
+    """Return an Auth0 access token.
+
+    The token from :data:`TOKEN_ENV_VAR` is used if set; otherwise the user
+    signs in (see :func:`sign_in`). The token is not renewed; keep an
+    :class:`Auth0Session` to have it renewed.
+
+    :param settings: Auth0 settings; read from the environment when omitted.
+    """
+    return sign_in(settings).access_token
+
+
+def _browser_sign_in(settings: Auth0Settings) -> dict:
+    """Sign the user in through the browser and return Auth0's token response."""
     # PKCE: the sign-in request carries only the SHA-256 challenge; the verifier
     # is revealed when the code is redeemed, so an intercepted code is useless
     # to anyone else.
@@ -262,9 +456,4 @@ def _login(settings: Auth0Settings) -> str:
         },
         timeout=30,
     )
-    if not response.ok:
-        raise RuntimeError(f"Auth0 did not issue a token: {response.text[:300]}")
-    token = response.json().get("access_token")
-    if not token:
-        raise RuntimeError(f"Auth0 response has no access_token: {response.text[:300]}")
-    return token
+    return _token_body(response)

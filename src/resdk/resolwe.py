@@ -29,6 +29,7 @@ import requests
 import slumber
 import tqdm
 from packaging import version
+from requests.exceptions import RequestException
 
 from resdk.uploader import Uploader
 
@@ -311,7 +312,7 @@ class Resolwe:
         username: Optional[str] = None,
         password: Optional[str] = None,
         interactive: bool = False,
-        token: Optional[str] = None,
+        token: Optional[Union[str, auth.Auth0Session]] = None,
     ):
         self.auth = ResAuth(
             username, password, self.url, interactive=interactive, token=token
@@ -358,7 +359,7 @@ class Resolwe:
         :param settings: Auth0 settings; read from ``RESDK_AUTH0_TENANT``
             environment variables when omitted.
         """
-        self._login(token=auth.get_access_token(settings))
+        self._login(token=auth.sign_in(settings))
         # Another user on the same machine can see the sign-in URL and complete
         # it with their own account, so show which account was signed in.
         if self.auth.username:
@@ -736,14 +737,15 @@ class ResAuth(requests.auth.AuthBase):
     :param str username: user's email
     :param str password: user's password
     :param str url: Resolwe server address
-    :param str token: Auth0 access token to send as a bearer credential
+    :param token: Auth0 access token to send as a bearer credential, or an
+        :class:`~resdk.auth.Auth0Session` that renews it
 
     """
 
     #: Authentication cookies. Empty in bearer-token mode.
     cookies: Dict[str, str] = {"csrftoken": "", "sessionid": ""}
-    #: Auth0 bearer token, when bearer authentication is used.
-    token: Optional[str] = None
+    #: Auth0 session, when bearer authentication is used.
+    tokens: Optional[auth.Auth0Session] = None
 
     def __init__(
         self,
@@ -751,28 +753,29 @@ class ResAuth(requests.auth.AuthBase):
         password: Optional[str] = None,
         url: str = DEFAULT_URL,
         interactive: bool = False,
-        token: Optional[str] = None,
+        token: Optional[Union[str, auth.Auth0Session]] = None,
     ):
         """Authenticate user on Resolwe server.
 
         :raises ValueError: if ``token`` is empty or contains whitespace or
             control characters.
         """
-        if token is not None:
+        if isinstance(token, str):
             # A malformed token would fail every request with an unclear error.
             token = token.strip()
             if not token:
                 raise ValueError("The token is empty.")
             if any(char.isspace() or not char.isprintable() for char in token):
                 raise ValueError("The token contains whitespace or control characters.")
+            token = auth.Auth0Session(token)
         self.logger = logging.getLogger(__name__)
         self.username = username
         self.url = url
-        self.token = token
+        self.tokens = token
         self.automatic_login_url = urljoin(self.url, AUTOMATIC_LOGIN_POSTFIX)
         self.interactive_login_url = urljoin(self.url, INTERACTIVE_LOGIN_POSTFIX)
 
-        if token is not None:
+        if self.tokens is not None:
             # Bearer authentication: no cookies are used.
             self.cookies = {}
             self.logger.info("Using bearer token authentication.")
@@ -864,11 +867,19 @@ Alternatively, you may visit the following URL which will autofill the code upon
 
         return cookie_dict
 
+    @property
+    def token(self) -> Optional[str]:
+        """Return the current access token, renewed if it is about to expire."""
+        return self.tokens.access_token if self.tokens is not None else None
+
     def __call__(self, request: requests.Request) -> requests.Request:
         """Set request headers."""
-        if self.token is not None:
+        token = self.token
+        if token is not None:
             # Bearer authentication: no cookie or CSRF header is needed.
-            request.headers["Authorization"] = f"Bearer {self.token}"
+            request.headers["Authorization"] = f"Bearer {token}"
+            if self.tokens is not None and self.tokens.can_refresh:
+                request.register_hook("response", self._retry_after_rejection)
         elif "csrftoken" in self.cookies:
             request.headers["X-CSRFToken"] = self.cookies["csrftoken"]
 
@@ -878,3 +889,42 @@ Alternatively, you may visit the following URL which will autofill the code upon
         # if r.path_url != '/upload/':
         #     r.headers['X-SubscribeID'] = self.subscribe_id
         return request
+
+    def _retry_after_rejection(
+        self, response: requests.Response, **kwargs
+    ) -> requests.Response:
+        """Renew the token and resend a request the server rejected with 401.
+
+        The token can be revoked or expire early. This retries once; a second
+        401 is returned to the caller.
+        """
+        if response.status_code != 401 or getattr(
+            response.request, "_resdk_retried", False
+        ):
+            return response
+        assert self.tokens is not None
+        sent = response.request.headers.get("Authorization", "")
+        # Retry only a request that carried our token to the Resolwe server.
+        # After a redirect to another origin (such as a storage host) the token
+        # was not sent, and it must not be sent there on a retry either.
+        if not sent.startswith("Bearer ") or not is_credential_origin(
+            response.request.url, url_origin(self.url)
+        ):
+            return response
+        try:
+            renewed = self.tokens.refresh_after_rejection(sent[len("Bearer ") :])
+        except (RuntimeError, RequestException) as error:
+            self.logger.warning("Could not renew the access token: %s", error)
+            renewed = False
+        if not renewed:
+            return response
+        # Release the connection of the rejected response before resending.
+        response.content
+        response.close()
+        retry = response.request.copy()
+        retry._resdk_retried = True  # type: ignore[attr-defined]
+        retry.headers["Authorization"] = f"Bearer {self.tokens.access_token}"
+        new_response = response.connection.send(retry, **kwargs)
+        new_response.history.append(response)
+        new_response.request = retry
+        return new_response
