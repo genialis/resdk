@@ -253,9 +253,13 @@ def macs_prepeak_parser(file_object, name, column_map, sample_name):
 
     df = _filter_and_rename_columns(df=df, column_map=column_map)
 
-    # Convert columns with percentage (%) symbols to float
+    # Convert columns with percentage (%) symbols to float. The decision rests
+    # on the present values: strings are ``object`` columns on pandas 2 and
+    # ``str`` columns on pandas 3, and on pandas 3 ``.str.endswith`` reports
+    # False for a missing cell, so an ``all()`` over the column would skip it.
     for column in df.columns:
-        if df[column].dtype == object and df[column].str.endswith("%").all():
+        values = df[column].dropna()
+        if len(values) and all(isinstance(v, str) and v.endswith("%") for v in values):
             df[column] = df[column].str.rstrip("%").astype(float) / 100
 
     case_df = df[df.index == sample_name]

@@ -3,14 +3,19 @@ from datetime import datetime
 from io import StringIO
 from time import sleep, time
 
+import numpy as np
 import pandas as pd
 import pytz
-from mock import MagicMock, NonCallableMagicMock, patch
+from mock import MagicMock, NonCallableMagicMock, PropertyMock, patch
 from pandas.testing import assert_frame_equal
 
 from resdk.resources import AnnotationField, AnnotationValue, Sample
 from resdk.tables import RNATables
-from resdk.tables.qc import _mate_file_groups, general_multiqc_parser
+from resdk.tables.qc import (
+    _mate_file_groups,
+    general_multiqc_parser,
+    macs_prepeak_parser,
+)
 
 from .utils import server_resource
 
@@ -340,7 +345,32 @@ class TestTables(unittest.TestCase):
         ct = RNATables(self.collection)
         relations = ct._get_relations()
 
-        expected = pd.DataFrame(["L1"], columns=["Category"], index=[123])
+        expected = pd.DataFrame(["L1"], columns=["Category"], index=[123], dtype=object)
+        expected.index.name = "sample_id"
+
+        assert_frame_equal(relations, expected)
+
+    def test_get_relations_partial_coverage(self):
+        other = NonCallableMagicMock(spec=Sample)
+        other.id = 456
+        self.relation.partitions = [
+            {"id": 1, "entity": 123, "position": 10, "label": "L1"},
+            {"id": 2, "entity": 999, "position": None, "label": "Outside"},
+        ]
+        ct = RNATables(self.collection)
+        with patch.object(
+            RNATables,
+            "_samples",
+            new_callable=PropertyMock,
+            return_value=[self.sample, other],
+        ):
+            relations = ct._get_relations()
+
+        # A sample without a partition is missing; a partition of a sample that
+        # is not in the table is dropped.
+        expected = pd.DataFrame(
+            ["L1 / 10", np.nan], columns=["Category"], index=[123, 456], dtype=object
+        )
         expected.index.name = "sample_id"
 
         assert_frame_equal(relations, expected)
@@ -523,3 +553,45 @@ class TestFragmentCounts(unittest.TestCase):
             fastq_names_per_mate=[["sampleB_L001", "sampleB_L002"]],
         )
         self.assertEqual(series["estimated_fragment_count_raw"], 10_000_000)
+
+
+class TestMacsPrepeakParser(unittest.TestCase):
+    def test_percentage_columns_become_fractions(self):
+        from resdk.tables.qc_mappings import MACS_PREPEAK_MAP
+
+        lines = [
+            "Sample\tTOTAL_READS\tMAPPED_PERCENTAGE\tNRF",
+            "sampleA\t1000\t95.5%\t0.9",
+            "Background of sampleA\t2000\t80%\t0.8",
+        ]
+        series = macs_prepeak_parser(
+            file_object=StringIO("\n".join(lines)),
+            name=123,
+            column_map=MACS_PREPEAK_MAP,
+            sample_name="sampleA",
+        )
+
+        self.assertEqual(series.name, 123)
+        self.assertAlmostEqual(series["case_prepeak_mapped_percentage"], 0.955)
+        self.assertAlmostEqual(series["control_prepeak_mapped_percentage"], 0.8)
+        self.assertEqual(series["case_prepeak_total_reads"], 1000)
+        self.assertEqual(series["control_prepeak_total_reads"], 2000)
+        self.assertAlmostEqual(series["control_prepeak_nrf"], 0.8)
+
+    def test_missing_percentage_cell_stays_missing(self):
+        from resdk.tables.qc_mappings import MACS_PREPEAK_MAP
+
+        lines = [
+            "Sample\tTOTAL_READS\tMAPPED_PERCENTAGE",
+            "sampleA\t1000\t95.5%",
+            "Background of sampleA\t2000\t",
+        ]
+        series = macs_prepeak_parser(
+            file_object=StringIO("\n".join(lines)),
+            name=123,
+            column_map=MACS_PREPEAK_MAP,
+            sample_name="sampleA",
+        )
+
+        self.assertAlmostEqual(series["case_prepeak_mapped_percentage"], 0.955)
+        self.assertTrue(pd.isna(series["control_prepeak_mapped_percentage"]))

@@ -49,7 +49,7 @@ dependencies = [
     "wrapt",
     "pytz",
     "tzlocal",
-    "pandas<3.0.0",
+    "pandas",
     "tqdm",
     "openpyxl",
     "xlrd",

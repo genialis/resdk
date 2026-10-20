@@ -339,15 +339,7 @@ class BaseTables(abc.ABC):
         relations.index.name = "sample_id"
 
         for relation in self.collection.relations.filter():
-            # Only consider relations that include only samples in self.samples
-            relation_entities_ids = set([p["entity"] for p in relation.partitions])
-            if not relation_entities_ids.issubset({s.id for s in self._samples}):
-                pass
-
-            relations[relation.category] = pd.Series(
-                index=relations.index, dtype="object"
-            )
-
+            values = {}
             for partition in relation.partitions:
                 value = ""
                 if partition["label"] and partition["position"]:
@@ -357,7 +349,14 @@ class BaseTables(abc.ABC):
                 elif partition["position"]:
                     value = partition["position"]
 
-                relations[relation.category][partition["entity"]] = value
+                values[partition["entity"]] = value
+
+            # Samples without a partition get a missing value; partitions of
+            # samples outside the table are dropped. The column stays ``object``,
+            # as before, whatever the values are.
+            relations[relation.category] = pd.Series(values, dtype=object).reindex(
+                relations.index
+            )
 
         return relations
 

@@ -31,6 +31,11 @@ Fixed
 
 Changed
 -------
+- Remove the ``pandas<3.0.0`` requirement. The relation columns of the
+  metadata table are filled in a way that works under pandas 3 and no longer
+  warns on pandas 2.2 and later, and the percentage columns of the MACS2
+  prepeak QC table are converted under pandas 3 as well. The output on
+  pandas 2 is unchanged
 - Change the parsing logic for the one-to-one metadata table
   in ``BaseTables`` class so it does not fail when the table
   index does not reflect the state of samples in the collection
