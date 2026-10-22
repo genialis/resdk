@@ -33,11 +33,11 @@ Changed
   in ``BaseTables`` class so it does not fail when the table
   index does not reflect the state of samples in the collection
 - Deprecate the ``download_and_rename`` method of ``Data`` objects in favor of
-  ``download`` with the ``custom_asset_name`` argument. The method now
-  delegates to ``download``, so a file is written under the custom name
-  directly instead of being renamed afterwards. Because of that, an existing
-  file is only kept when it matches the md5 checksum of the file on the
-  server, while it used to be kept unconditionally
+  ``download`` with the ``custom_asset_name`` argument. The method emits a
+  ``FutureWarning`` and delegates to ``download``, so a file is written
+  under the custom name directly instead of being renamed afterwards. Because
+  of that, an existing file is only kept when it matches the md5 checksum of
+  the file on the server, while it used to be kept unconditionally
 - Download each MultiQC report file only once in ``QCTables``, so that data
   types backed by the same file, e.g. ``general_fastq``, ``general_alignment``,
   ``general_quantification`` and ``general_qc``, no longer each make a

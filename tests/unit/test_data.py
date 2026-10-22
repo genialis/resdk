@@ -328,15 +328,25 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
 
         data.resolwe._download_files.assert_not_called()
 
+    def test_download_and_rename_warns_deprecation(self):
+        data = self.data_with_assets(["filtered_variants.vcf.gz"])
+        data.download = MagicMock()
+
+        with self.assertWarnsRegex(FutureWarning, "md5 checksum") as cm:
+            data.download_and_rename(custom_asset_name="sample1.vcf.gz")
+
+        self.assertEqual(cm.filename, __file__)
+
     def test_download_and_rename_delegates_to_download(self):
         data = self.data_with_assets(["filtered_variants.vcf.gz"])
         data.download = MagicMock()
 
-        data.download_and_rename(
-            custom_asset_name="sample1.vcf.gz",
-            field_name="vcf",
-            download_dir="/some/path",
-        )
+        with self.assertWarns(FutureWarning):
+            data.download_and_rename(
+                custom_asset_name="sample1.vcf.gz",
+                field_name="vcf",
+                download_dir="/some/path",
+            )
 
         data.download.assert_called_once_with(
             file_name=None,
@@ -347,11 +357,12 @@ class TestDataDownloadCustomAssetName(unittest.TestCase):
         )
 
         data.download.reset_mock()
-        data.download_and_rename(
-            custom_asset_name="sample1.vcf.gz",
-            overwrite_existing=True,
-            field_name="vcf",
-        )
+        with self.assertWarns(FutureWarning):
+            data.download_and_rename(
+                custom_asset_name="sample1.vcf.gz",
+                overwrite_existing=True,
+                field_name="vcf",
+            )
 
         self.assertEqual(
             data.download.call_args.kwargs["skip_existing"],

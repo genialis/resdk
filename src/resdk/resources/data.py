@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import warnings
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urljoin
 
@@ -402,6 +403,18 @@ class Data(BaseResolweResource):
             Note that a file is only kept when its md5 checksum matches the
             checksum on the server, while this method keeps any existing file.
         """
+        # FutureWarning instead of DeprecationWarning, because Python hides the
+        # latter when the caller is not in __main__, e.g. in a helper module.
+        # Point the warning at the caller's line.
+        warnings.warn(
+            "Method `Data.download_and_rename` is deprecated. Use `Data.download` "
+            "with the `custom_asset_name` argument instead. With "
+            "`overwrite_existing=False`, an existing file is now only kept when its "
+            "md5 checksum matches the file on the server, and is downloaded again "
+            "otherwise.",
+            FutureWarning,
+            stacklevel=2,
+        )
         self.download(
             file_name=file_name,
             field_name=field_name,
