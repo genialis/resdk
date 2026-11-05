@@ -10,6 +10,7 @@ Unreleased
 
 Added
 -----
+- Add support for ``Python 3.15``
 - Add the ``skip_existing`` argument to the ``download`` methods of ``Data``,
   ``Sample`` and ``Collection`` objects. When set to ``True``, files that are
   already present in the download directory and match the md5 checksum of the

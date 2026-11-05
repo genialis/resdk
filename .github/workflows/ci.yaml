@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toxenv: [py39, py310, py311, py312, py313, py314, docs, linters, package]
+        toxenv: [py39, py310, py311, py312, py313, py314, py315, docs, linters, package]
 
     steps:
       - name: Checkout
