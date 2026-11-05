@@ -67,10 +67,7 @@ class TypeValidator(BaseValueValidator):
             many = "a list of " if field._many else ""
             types = f"{', '.join(_type.__name__ for _type in self._accepted_types)}"
             raise ValueError(
-                (
-                    f"Type of '{class_name}.{field.public_name}' "
-                    f"must be {many}'{types}'."
-                )
+                f"Type of '{class_name}.{field.public_name}' must be {many}'{types}'."
             )
 
 
@@ -395,9 +392,9 @@ class DictResourceField(BaseField):
             self._resource_class = getattr(
                 importlib.import_module("resdk.resources"), self._resource_class_name
             )
-            assert issubclass(
-                self._resource_class, BaseResource
-            ), f"Invalid resource class '{self._resource_class_name}'."
+            assert issubclass(self._resource_class, BaseResource), (
+                f"Invalid resource class '{self._resource_class_name}'."
+            )
         return self._resource_class
 
     def _to_json_single(self, value):
@@ -413,9 +410,9 @@ class DictResourceField(BaseField):
         from resdk.resources.base import BaseResource
 
         assert instance is not None, "Instance must be provided."
-        assert isinstance(
-            value, (dict, BaseResource)
-        ), "Raw value for DictResourceFiled must be a dict or BaseResource."
+        assert isinstance(value, (dict, BaseResource)), (
+            "Raw value for DictResourceFiled must be a dict or BaseResource."
+        )
         if isinstance(value, dict):
             value = self.Resource(
                 resolwe=instance.resolwe,

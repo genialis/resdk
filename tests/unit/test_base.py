@@ -97,7 +97,6 @@ class TestBaseResolweResource(unittest.TestCase):
 
 
 class TestBaseMethods(unittest.TestCase):
-
     @patch("resdk.resources.base.BaseResolweResource", spec=True)
     def test_save_post(self, base_mock):
         resolwe_mock = MagicMock()
@@ -219,7 +218,6 @@ class TestBaseMethods(unittest.TestCase):
 
 
 class TestAttributesDefined(unittest.TestCase):
-
     def test_attributes_are_defined(self):
         classes = [
             BaseResource,

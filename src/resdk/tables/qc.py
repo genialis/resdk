@@ -92,9 +92,7 @@ def _aggregate_df(df, column_map, prefix=None):
     agg_map = {
         col["slug"]: (
             # This fixes an issue where pandas mistakenly interprets "first" as a method
-            (lambda x: x.iloc[0])
-            if col["agg_func"] == "first"
-            else col["agg_func"]
+            (lambda x: x.iloc[0]) if col["agg_func"] == "first" else col["agg_func"]
         )
         for col in column_map
         if col["slug"] in df.columns
