@@ -351,7 +351,7 @@ class BaseTables(abc.ABC):
             for partition in relation.partitions:
                 value = ""
                 if partition["label"] and partition["position"]:
-                    value = f'{partition["label"]} / {partition["position"]}'
+                    value = f"{partition['label']} / {partition['position']}"
                 elif partition["label"]:
                     value = partition["label"]
                 elif partition["position"]:
