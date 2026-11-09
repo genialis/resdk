@@ -41,6 +41,9 @@ Added
 
 Fixed
 -----
+- Print the interactive-login code on its own instead of in a URL that
+  pre-fills it, because newer servers no longer pre-fill the code from a
+  link. Always print the login URL, also when a browser is opened
 - Raise an error if a user calls the download method
   on a data object and inputs a non-existing file or field name
 - Query reads objects in batches in ``QCTables`` to avoid exceeding the URL
