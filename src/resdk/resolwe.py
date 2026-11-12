@@ -874,8 +874,8 @@ class ResAuth(requests.auth.AuthBase):
         auth_id_url = urljoin(self.interactive_login_url, "auth-id/")
         auth_id = requests.get(auth_id_url).json()["auth_id"]
 
-        # Never put the auth_id in the URL: the system call could be intercepted,
-        # and newer servers ignore a code given in the link, so the user types it.
+        # Never put the auth_id in the URL: newer servers ignore a code given in
+        # the link, so the user types it.
         # Always print the URL: webbrowser.open returns True as soon as a helper
         # such as xdg-open starts, even if no window ever appears.
         if webbrowser.open(self.interactive_login_url):
