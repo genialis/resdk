@@ -1014,11 +1014,40 @@ class TestResAuth(unittest.TestCase):
             "https://url.com/remote-auth/auth-id/"
         )
         print_mock.assert_called_once()
+        message = print_mock.call_args.args[0]
+        # The URL is printed even when a browser was opened, which may fail
+        # silently on a headless host; the code is printed on its own.
+        self.assertIn("\nhttps://url.com/remote-auth/\n", message)
+        self.assertIn("\n123\n", message)
+        self.assertNotIn("auth_id=", message)
         time_mock.sleep.assert_called_once_with(1)
         self.assertEqual(requests_mock.Session.return_value.get.call_count, 2)
         requests_mock.Session.return_value.get.assert_called_with(
             "https://url.com/remote-auth/poll/"
         )
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_without_browser(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        webbrowser_mock.open.return_value = False
+        requests_mock.get.return_value = MagicMock(
+            status_code=200, **{"json.return_value": {"auth_id": "123"}}
+        )
+        requests_mock.Session.return_value.get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(
+                return_value={"csrftoken": "my-token", "sessionid": "my-id"}
+            ),
+        )
+        ResAuth.interactive_login(self.auth_mock)
+        message = print_mock.call_args.args[0]
+        self.assertIn("\nhttps://url.com/remote-auth/\n", message)
+        self.assertIn("\n123\n", message)
+        self.assertNotIn("auth_id=", message)
 
     @patch("resdk.resolwe.requests")
     def test_automatic_login(self, requests_mock):

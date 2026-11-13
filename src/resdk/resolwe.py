@@ -23,7 +23,7 @@ from contextlib import suppress
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Dict, Iterable, Optional, TypedDict, Union
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 import slumber
@@ -874,25 +874,18 @@ class ResAuth(requests.auth.AuthBase):
         auth_id_url = urljoin(self.interactive_login_url, "auth-id/")
         auth_id = requests.get(auth_id_url).json()["auth_id"]
 
-        # Use login url without the auth_id, as the system call could be intercepted.
-        browser_opened = webbrowser.open(self.interactive_login_url)
-        login_url_with_auth_id = (
-            urlparse(self.interactive_login_url)
-            ._replace(query=urlencode({"auth_id": auth_id}))
-            .geturl()
+        # Never put the auth_id in the URL: newer servers ignore a code given in
+        # the link, so the user types it.
+        # Always print the URL: webbrowser.open returns True as soon as a helper
+        # such as xdg-open starts, even if no window ever appears.
+        if webbrowser.open(self.interactive_login_url):
+            message = "A browser window should open."
+        else:
+            message = "Browser could not be automatically opened."
+        message += (
+            " Enter the code below at the following URL:\n\n"
+            f"{self.interactive_login_url}\n\n{auth_id}\n"
         )
-        message_automatic = f"""Enter the following code in the opened browser window:
-
-{auth_id}
-
-Alternatively, you may visit the following URL which will autofill the code upon loading:
-{login_url_with_auth_id}\n"""
-        message_not_automatic = f"""Open the following URL which will autofill the code upon loading:
-
-{login_url_with_auth_id}\n"""
-
-        message = f"Browser {'could not' if not browser_opened else 'will'} be automatically opened.\n"
-        message += message_automatic if browser_opened else message_not_automatic
 
         # Do not use logger here, because we want the url to be visible even if logging
         # is disabled.
