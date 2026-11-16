@@ -845,21 +845,29 @@ class ResAuth(requests.auth.AuthBase):
     def automatic_login(self, username: str, password: str) -> AuthCookie:
         """Attempt to perform automatic SAML login.
 
-        :returns: authentication cookie dict on success, None on failure.
+        :returns: authentication cookie dict.
+        :raises RuntimeError: if the server rejects the login or answers
+            without the session cookies.
         """
         self.logger.info("Attempting automatic login.")
         response = requests.post(
             self.automatic_login_url,
             data={"email": username, "password": password},
         )
-        cookies = response.cookies.get_dict()
         # Status should be either 204 (No Content) or 200 (OK).
-        if (
-            response.status_code not in [200, 204]
-            or "sessionid" not in cookies
-            or "csrftoken" not in cookies
-        ):
-            raise RuntimeError("Automatic login failed.")
+        if response.status_code not in [200, 204]:
+            # The body tells a server that is not ready (5xx) from rejected
+            # credentials (4xx); it never contains the password.
+            excerpt = " ".join(response.text.split())[:200]
+            raise RuntimeError(
+                f"Automatic login failed: HTTP {response.status_code} {excerpt}".rstrip()
+            )
+        cookies = response.cookies.get_dict()
+        if "sessionid" not in cookies or "csrftoken" not in cookies:
+            raise RuntimeError(
+                f"Automatic login failed: HTTP {response.status_code} "
+                "without the session cookies."
+            )
 
         return {
             "sessionid": cookies["sessionid"],

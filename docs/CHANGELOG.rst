@@ -45,6 +45,9 @@ Fixed
   on a data object and inputs a non-existing file or field name
 - Query reads objects in batches in ``QCTables`` to avoid exceeding the URL
   length limit on large collections
+- Report the HTTP status and the start of the response body when the
+  password login fails, so that a server that is not ready yet can be told
+  from rejected credentials
 
 Changed
 -------
