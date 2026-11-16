@@ -132,7 +132,13 @@ jobs:
             }
           }'
           # Perform a clean restart of all services after the database is online
-          kubectl rollout restart deployment asgi-server channels-manager listener background-task uploader
+          services="asgi-server channels-manager listener background-task uploader"
+          kubectl rollout restart deployment $services
+          # The Available condition stays true while the old pods serve, so
+          # wait for each rollout to replace them before the tests start.
+          for service in $services; do
+            kubectl rollout status deployment/"$service" --timeout=1200s
+          done
           kubectl wait --for=condition=available --timeout=1200s --all deployments
 
       - name: Test curl
