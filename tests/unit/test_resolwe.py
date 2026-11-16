@@ -960,6 +960,8 @@ class TestResAuth(unittest.TestCase):
     @patch("resdk.resolwe.ResAuth", spec=True)
     def setUp(self, auth_mock):
         auth_mock.interactive_login_url = "https://url.com/remote-auth/"
+        auth_mock.automatic_login_url = "http://www.abc.com/saml-auth/api-login/"
+        auth_mock.logger = MagicMock()
         auth_mock.configure_mock(sessionid=None, csrftoken=None)
         self.auth_mock = auth_mock
 
@@ -1027,13 +1029,45 @@ class TestResAuth(unittest.TestCase):
             "csrftoken": "my-token",
             "sessionid": "my-id",
         }
-        self.auth_mock.logger = MagicMock()
-        self.auth_mock.automatic_login_url = "http://www.abc.com/saml-auth/api-login/"
         cookies = ResAuth.automatic_login(
             self.auth_mock, username="me", password="pass"
         )
         self.auth_mock.logger.info.assert_called_once()
         self.assertDictEqual(cookies, {"csrftoken": "my-token", "sessionid": "my-id"})
+
+    @patch("resdk.resolwe.requests")
+    def test_automatic_login_error_reports_status_and_body(self, requests_mock):
+        requests_mock.post.return_value = MagicMock(
+            status_code=503,
+            text="<html>\n  <body>\n    Service Temporarily Unavailable\n  </body>\n</html>",
+        )
+        requests_mock.post.return_value.cookies.get_dict.return_value = {}
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"^Automatic login failed: HTTP 503 <html> <body> Service Temporarily "
+            r"Unavailable </body> </html>$",
+        ):
+            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
+
+    @patch("resdk.resolwe.requests")
+    def test_automatic_login_error_truncates_body(self, requests_mock):
+        requests_mock.post.return_value = MagicMock(status_code=502, text="x" * 1000)
+        with self.assertRaisesRegex(
+            RuntimeError, r"^Automatic login failed: HTTP 502 x{200}$"
+        ):
+            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
+
+    @patch("resdk.resolwe.requests")
+    def test_automatic_login_error_without_cookies(self, requests_mock):
+        requests_mock.post.return_value = MagicMock(status_code=200)
+        requests_mock.post.return_value.cookies.get_dict.return_value = {
+            "csrftoken": "my-token"
+        }
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"^Automatic login failed: HTTP 200 without the session cookies\.$",
+        ):
+            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
 
     def test_call(self):
         res_auth = MagicMock(
