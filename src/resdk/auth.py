@@ -32,7 +32,7 @@ connecting to Resolwe::
 .. autofunction:: resdk.auth.sign_in
 
 .. autoclass:: resdk.auth.Auth0Session
-   :members: access_token, can_refresh, refresh_after_rejection
+   :members: access_token, email, can_refresh, refresh_after_rejection
 
 .. autoclass:: resdk.auth.Auth0Settings
    :members:
@@ -46,6 +46,7 @@ connecting to Resolwe::
 import base64
 import hashlib
 import http.server
+import json
 import logging
 import os
 import secrets
@@ -95,6 +96,10 @@ DEFAULT_SCOPE = (
     "openid profile email offline_access expressions:api "
     "supermodel:score supermodel:versions:read"
 )
+#: Claim of the access token that holds the user's email. The Resolwe server
+#: identifies the user by it.
+EMAIL_CLAIM = "https://genialis.com/email"
+
 #: The port is fixed because the redirect URI must exactly match a callback
 #: URL registered in the Auth0 application.
 CALLBACK_PORT = 8484
@@ -239,6 +244,18 @@ class Auth0Session:
         return bool(self._refresh_token and self.settings)
 
     @property
+    def email(self) -> Optional[str]:
+        """Return the email the access token names, or ``None`` if it names none.
+
+        The email is read from the token without checking its signature and
+        without contacting Auth0 or Resolwe. It tells which account the token
+        is for and proves nothing: the Resolwe server verifies the token on
+        every request.
+        """
+        email = _claims(self._access_token).get(EMAIL_CLAIM)
+        return email if isinstance(email, str) and email else None
+
+    @property
     def access_token(self) -> str:
         """Return a valid access token, refreshing it first if it is about to expire.
 
@@ -328,6 +345,22 @@ class Auth0Session:
         if expires_in is None:
             return None
         return time.monotonic() + float(expires_in)
+
+
+def _claims(token: str) -> dict:
+    """Return the claims of a JWT, unverified, or ``{}`` if ``token`` is not one."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload = parts[1]
+    try:
+        # The payload is base64url without padding.
+        claims = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        )
+    except ValueError:
+        return {}
+    return claims if isinstance(claims, dict) else {}
 
 
 #: Errors from Auth0's token endpoint after which a refresh token is unusable.
