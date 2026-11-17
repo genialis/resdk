@@ -76,6 +76,9 @@ AUTOMATIC_LOGIN_POSTFIX = "saml-auth/api-login/"
 INTERACTIVE_LOGIN_POSTFIX = "saml-auth/remote-login/"
 MINIMAL_SUPPORTED_VERSION_POSTFIX = "api/resdk_minimal_supported_version"
 SERVER_MODULE_VERSIONS_POSTFIX = "/about/versions"
+CURRENT_USER_POSTFIX = "/api/user"
+#: Seconds to wait for the server to say whether it accepts a token.
+TOKEN_CHECK_TIMEOUT = 10
 
 
 class ResolweResource(slumber.Resource):
@@ -316,7 +319,12 @@ class Resolwe:
         password: Optional[str] = None,
         interactive: bool = False,
         token: Optional[Union[str, auth.Auth0Session]] = None,
-    ):
+    ) -> Optional[bool]:
+        """Connect with the given credentials.
+
+        :return: for a token, whether the server accepted it, and ``None`` if
+            the server did not say; ``None`` for any other login.
+        """
         self.auth = ResAuth(
             username, password, self.url, interactive=interactive, token=token
         )
@@ -330,11 +338,72 @@ class Resolwe:
         self._initialize_queries()
         self.uploader.invalidate_cache()
 
+        if self.auth.tokens is not None:
+            return self._confirm_token()
         # Retrieve the logged in user and save it to auth. Necessary for interactive
         # login.
         with suppress(Exception):
             logged_in_user = self.user.get(current_only=True)
             self.auth.username = logged_in_user.email
+        return None
+
+    def _confirm_token(self) -> Optional[bool]:
+        """Ask the server whether it accepts the token of this connection.
+
+        A server rejects a token with 401 or 403. A server without bearer
+        authentication ignores the token and names no current user, as for an
+        anonymous request. A session that has expired and cannot be renewed
+        has no token to send. In all three cases the connection gets no
+        username.
+
+        A server that accepts the token names the current user. The username
+        stays the email in the token; the server's email is used only when the
+        token names none, because a server may read the account from another
+        claim.
+
+        A server that cannot be reached, or that answers anything else (a
+        server error, for example), has not rejected the token. The token and
+        its username are kept, so that an outage of the server does not end a
+        sign-in that Auth0 accepted.
+
+        :return: ``True`` if the server accepted the token, ``False`` if it
+            did not, ``None`` if it did not say.
+        """
+        try:
+            response = self.session.get(
+                urljoin(self.url, CURRENT_USER_POSTFIX),
+                params={"current_only": "1"},
+                auth=self.auth,
+                timeout=TOKEN_CHECK_TIMEOUT,
+            )
+        except RuntimeError as error:
+            self.logger.warning("The token cannot be used: %s", error)
+            self.auth.username = None
+            return False
+        except RequestException as error:
+            self.logger.warning(
+                "The server did not say whether it accepts the token (%s); "
+                "keeping the token.",
+                error,
+            )
+            return None
+        users = None
+        if response.status_code == 200:
+            with suppress(ValueError):
+                users = response.json()
+        if response.status_code in (401, 403) or users == []:
+            self.auth.username = None
+            return False
+        if isinstance(users, list):
+            if self.auth.username is None and isinstance(users[0], dict):
+                self.auth.username = users[0].get("email") or None
+            return True
+        self.logger.warning(
+            "The server did not say whether it accepts the token (HTTP %s); "
+            "keeping the token.",
+            response.status_code,
+        )
+        return None
 
     def login(self, username: Optional[str] = None, password: Optional[str] = None):
         """Perform the interactive login.
@@ -361,7 +430,9 @@ class Resolwe:
 
         If Auth0 refuses, or the server does not accept its token (because
         bearer authentication is not enabled there yet), the old password login
-        of the Resolwe server is used instead.
+        of the Resolwe server is used instead. A server that cannot be reached
+        has not refused the token: the token is kept and the server does not
+        get the password.
         """
         try:
             settings = auth.Auth0Settings.from_env()
@@ -376,8 +447,7 @@ class Resolwe:
                     "Auth0 sign-in failed (%s); using the server login.", error
                 )
             else:
-                self._login(token=session)
-                if self.auth.username is not None:
+                if self._login(token=session) is not False:
                     return
                 self.logger.warning(
                     "The server did not accept the Auth0 token; using the server login."
@@ -409,16 +479,20 @@ class Resolwe:
         :param device: ``True`` for the device flow, ``False`` for the browser;
             chosen automatically by default.
         """
-        self._login(token=auth.sign_in(settings, device=device))
+        accepted = self._login(token=auth.sign_in(settings, device=device))
         # Another user on the same machine can see the sign-in URL and complete
         # it with their own account, so show which account was signed in.
-        if self.auth.username:
-            message = f"Signed in to Resolwe as {self.auth.username}."
-        else:
-            # The lookup fails when the server rejects the token.
+        account = self.auth.username or "an account the token does not name"
+        if accepted:
+            message = f"Signed in to Resolwe as {account}."
+        elif accepted is None:
             message = (
-                "Got an Auth0 token, but Resolwe did not identify the account: "
-                "the token may not be valid for this server."
+                f"Got an Auth0 token for {account}, but the server did not confirm it."
+            )
+        else:
+            message = (
+                "Got an Auth0 token, but it does not sign in to Resolwe: the "
+                "server did not accept it."
             )
         print(message, file=sys.stderr)
 
@@ -782,7 +856,7 @@ class ResAuth(requests.auth.AuthBase):
       username and password or with the interactive browser login, or
     * an Auth0 bearer token, sent as the ``Authorization`` header. When a
       ``token`` is given, username and password are ignored and no cookies
-      are used.
+      are used. The username is then the email the token names.
 
     :param str username: user's email
     :param str password: user's password
@@ -828,6 +902,7 @@ class ResAuth(requests.auth.AuthBase):
         if self.tokens is not None:
             # Bearer authentication: no cookies are used.
             self.cookies = {}
+            self.username = self.tokens.email
             self.logger.info("Using bearer token authentication.")
             return
 

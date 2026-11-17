@@ -1,6 +1,8 @@
 """Unit tests for bearer-token / Auth0 authentication."""
 
+import base64
 import io
+import json
 import socket
 import threading
 import time
@@ -22,6 +24,20 @@ class _Request:
         self.headers = {}
 
 
+def _jwt(**claims):
+    """Return an unsigned token with the given claims."""
+
+    def part(data):
+        encoded = base64.urlsafe_b64encode(json.dumps(data).encode())
+        return encoded.rstrip(b"=").decode()
+
+    return f"{part({'alg': 'RS256'})}.{part(claims)}.signature"
+
+
+EMAIL = "user@example.com"
+TOKEN = _jwt(**{auth.EMAIL_CLAIM: EMAIL})
+
+
 class TestResAuthBearer(unittest.TestCase):
     def test_bearer_sets_authorization_header(self):
         res_auth = ResAuth(url="http://localhost:8000", token="a.b.c")
@@ -36,6 +52,15 @@ class TestResAuthBearer(unittest.TestCase):
             res_auth = ResAuth("user", "pass", "http://localhost:8000", token="a.b.c")
         automatic_login.assert_not_called()
         self.assertEqual(res_auth.cookies, {})
+
+    def test_username_is_the_email_in_the_token(self):
+        with patch.object(ResAuth, "automatic_login"):
+            res_auth = ResAuth("other", "pass", "http://localhost:8000", token=TOKEN)
+        self.assertEqual(res_auth.username, EMAIL)
+
+    def test_token_without_an_email_has_no_username(self):
+        res_auth = ResAuth("other", url="http://localhost:8000", token="a.b.c")
+        self.assertIsNone(res_auth.username)
 
     def test_token_login_clears_session_cookies(self):
         resolwe = MagicMock()
@@ -199,6 +224,46 @@ class TestSignIn(unittest.TestCase):
         self.assertEqual(session.access_token, "env-token")
 
 
+class TestTokenEmail(unittest.TestCase):
+    def test_email_is_read_from_the_access_token(self):
+        self.assertEqual(auth.Auth0Session(TOKEN).email, EMAIL)
+
+    def test_token_without_the_claim_names_no_email(self):
+        for claims in ({}, {"email": EMAIL}, {auth.EMAIL_CLAIM: ""}):
+            with self.subTest(claims=claims):
+                self.assertIsNone(auth.Auth0Session(_jwt(**claims)).email)
+
+    def test_claim_that_is_not_text_names_no_email(self):
+        for value in (None, 7, [EMAIL], {"address": EMAIL}):
+            with self.subTest(value=value):
+                token = _jwt(**{auth.EMAIL_CLAIM: value})
+                self.assertIsNone(auth.Auth0Session(token).email)
+
+    def test_token_that_is_not_a_jwt_names_no_email(self):
+        not_json = base64.urlsafe_b64encode(b"not json").decode()
+        a_list = base64.urlsafe_b64encode(b'["user@example.com"]').decode()
+        for token in (
+            "opaque",
+            "a.b.c",
+            "a.\u017e.c",
+            f"a.{not_json}.c",
+            f"a.{a_list}.c",
+            f"{TOKEN}.more.parts",
+        ):
+            with self.subTest(token=token):
+                self.assertIsNone(auth.Auth0Session(token).email)
+
+    def test_email_is_the_one_of_the_renewed_token(self):
+        session = auth.Auth0Session.from_token_response(
+            {"access_token": TOKEN, "refresh_token": "r1", "expires_in": 0}, SETTINGS
+        )
+        renewed = _jwt(**{auth.EMAIL_CLAIM: "renewed@example.com"})
+        response = _token_response(access_token=renewed, expires_in=600)
+        with patch.object(auth.requests, "post", return_value=response):
+            session.access_token
+        self.assertEqual(session.email, "renewed@example.com")
+
+
 class TestDeviceSignIn(unittest.TestCase):
     CODE = {
         "device_code": "dev",
@@ -318,6 +383,7 @@ class TestLoginWithPassword(unittest.TestCase):
             # The user lookup succeeds only when the server accepts the login.
             if token is None or accepted:
                 resolwe.auth.username = "u@example.com"
+            return None if token is None else accepted
 
         resolwe._login.side_effect = login
         return resolwe
@@ -377,6 +443,171 @@ class TestLoginWithPassword(unittest.TestCase):
         self._login(resolwe, sign_in=MagicMock(side_effect=RuntimeError("refused")))
         resolwe._login.assert_called_once_with(username="u@example.com", password="pw")
         resolwe.logger.warning.assert_called_once()
+
+
+def _answer(status, body=None):
+    """Return the server's answer to the question whether it accepts the token."""
+    response = MagicMock(status_code=status)
+    if body is None:
+        response.json.side_effect = ValueError("not JSON")
+    else:
+        response.json.return_value = body
+    return response
+
+
+#: Answers of a server that does not accept the token: an invalid token, a
+#: token it refuses, and a server that ignores tokens and sees nobody.
+REJECTIONS = (_answer(401), _answer(403), _answer(200, []))
+#: A server that cannot be reached, or does not answer the question.
+NO_ANSWERS = (
+    requests.ConnectionError("unreachable"),
+    requests.Timeout("too slow"),
+    _answer(502),
+    _answer(503),
+    _answer(404),
+    _answer(200),
+    _answer(200, {"detail": "maintenance"}),
+)
+
+
+def _connection(answer, url="https://app.example"):
+    """Return a connection whose server gives ``answer`` about the token."""
+    resolwe = MagicMock(url=url)
+    resolwe._confirm_token = lambda: Resolwe._confirm_token(resolwe)
+    resolwe._login = lambda **kwargs: Resolwe._login(resolwe, **kwargs)
+    if isinstance(answer, Exception):
+        resolwe.session.get.side_effect = answer
+    else:
+        resolwe.session.get.return_value = answer
+    return resolwe
+
+
+class TestTokenLogin(unittest.TestCase):
+    def _login(self, answer, token=TOKEN):
+        resolwe = _connection(answer)
+        with patch("resdk.resolwe.ResolweAPI"):
+            resolwe.accepted = resolwe._login(token=token)
+        return resolwe
+
+    def test_username_is_the_email_in_the_token(self):
+        # The server knows the account under another spelling; the token wins.
+        resolwe = self._login(_answer(200, [{"email": "User@Example.com"}]))
+        self.assertEqual(resolwe.auth.username, EMAIL)
+        self.assertIs(resolwe.accepted, True)
+        resolwe.user.get.assert_not_called()
+
+    def test_accepted_token_without_an_email_gets_the_servers(self):
+        # A server may read the account from another claim than ReSDK does.
+        resolwe = self._login(_answer(200, [{"email": EMAIL}]), token="a.b.c")
+        self.assertEqual(resolwe.auth.username, EMAIL)
+        self.assertIs(resolwe.accepted, True)
+
+    def test_server_url_with_a_path_asks_the_api_of_the_host(self):
+        resolwe = _connection(_answer(200, [{"email": EMAIL}]), "https://host/x/")
+        with patch("resdk.resolwe.ResolweAPI") as api:
+            resolwe._login(token=TOKEN)
+        self.assertEqual(api.call_args.args[0], "https://host/api/")
+        self.assertEqual(resolwe.session.get.call_args.args, ("https://host/api/user",))
+
+    def test_expired_session_signs_nobody_in(self):
+        session = auth.Auth0Session(TOKEN)
+        error = RuntimeError("The Auth0 session has expired; sign in again.")
+        resolwe = _connection(error)
+        with patch("resdk.resolwe.ResolweAPI"):
+            accepted = resolwe._login(token=session)
+        self.assertIs(accepted, False)
+        self.assertIsNone(resolwe.auth.username)
+        resolwe.logger.warning.assert_called_once()
+
+    def test_server_is_asked_once_with_the_token_and_a_timeout(self):
+        resolwe = self._login(_answer(200, [{"email": EMAIL}]))
+        resolwe.session.get.assert_called_once()
+        call = resolwe.session.get.call_args
+        self.assertEqual(call.args, ("https://app.example/api/user",))
+        self.assertEqual(call.kwargs["params"], {"current_only": "1"})
+        self.assertIs(call.kwargs["auth"], resolwe.auth)
+        self.assertGreater(call.kwargs["timeout"], 0)
+
+    def test_rejected_token_signs_nobody_in(self):
+        for answer in REJECTIONS:
+            with self.subTest(status=answer.status_code):
+                resolwe = self._login(answer)
+                self.assertIsNone(resolwe.auth.username)
+                self.assertIs(resolwe.accepted, False)
+
+    def test_token_is_kept_when_the_server_does_not_answer(self):
+        for answer in NO_ANSWERS:
+            with self.subTest(answer=answer):
+                resolwe = self._login(answer)
+                self.assertEqual(resolwe.auth.username, EMAIL)
+                self.assertEqual(resolwe.auth.token, TOKEN)
+                self.assertIsNone(resolwe.accepted)
+                resolwe.logger.warning.assert_called_once()
+
+    def test_session_login_asks_the_server_for_the_account(self):
+        resolwe = _connection(_answer(200, []))
+        resolwe.user.get.return_value.email = EMAIL
+        with (
+            patch("resdk.resolwe.ResolweAPI"),
+            patch.object(ResAuth, "interactive_login", return_value={}),
+        ):
+            accepted = Resolwe._login(resolwe, interactive=True)
+        self.assertIsNone(accepted)
+        self.assertEqual(resolwe.auth.username, EMAIL)
+        resolwe.user.get.assert_called_once_with(current_only=True)
+        resolwe.session.get.assert_not_called()
+
+
+class TestPasswordLoginAgainstTheServer(unittest.TestCase):
+    """The choice between the Auth0 token and the server's password login."""
+
+    SETTINGS = auth.Auth0Settings(
+        domain="example.auth0.com",
+        client_id="cid",
+        audience="https://api.example",
+        servers=("app.example",),
+    )
+
+    def _login(self, answer, token=TOKEN):
+        resolwe = _connection(answer)
+        session = auth.Auth0Session(token)
+        with (
+            patch.object(auth.Auth0Settings, "from_env", return_value=self.SETTINGS),
+            patch.object(auth, "sign_in", return_value=session),
+            patch("resdk.resolwe.ResolweAPI"),
+            patch.object(
+                ResAuth, "automatic_login", return_value={"sessionid": "s"}
+            ) as server_login,
+        ):
+            Resolwe._login_with_password(resolwe, EMAIL, "pw")
+        return resolwe, session, server_login
+
+    def test_accepted_token_is_used(self):
+        resolwe, session, server_login = self._login(_answer(200, [{"email": EMAIL}]))
+        self.assertIs(resolwe.auth.tokens, session)
+        server_login.assert_not_called()
+
+    def test_rejected_token_falls_back_to_the_server_login(self):
+        for answer in REJECTIONS:
+            with self.subTest(status=answer.status_code):
+                resolwe, _, server_login = self._login(answer)
+                server_login.assert_called_once_with(EMAIL, "pw")
+                self.assertIsNone(resolwe.auth.tokens)
+
+    def test_unreachable_server_never_gets_the_password(self):
+        for answer in NO_ANSWERS:
+            with self.subTest(answer=answer):
+                resolwe, session, server_login = self._login(answer)
+                server_login.assert_not_called()
+                self.assertIs(resolwe.auth.tokens, session)
+                self.assertEqual(resolwe.auth.username, EMAIL)
+
+    def test_token_without_an_email_is_used_like_any_other(self):
+        for answer in (_answer(200, [{"email": EMAIL}]), _answer(503)):
+            with self.subTest(status=answer.status_code):
+                resolwe, session, server_login = self._login(answer, token="a.b.c")
+                server_login.assert_not_called()
+                self.assertIs(resolwe.auth.tokens, session)
 
 
 class TestTenantServers(unittest.TestCase):
@@ -643,27 +874,31 @@ class TestRetryAfterRejection(unittest.TestCase):
 
 
 class TestLoginWithAuth0(unittest.TestCase):
-    def test_prints_signed_in_account(self):
+    def _message(self, accepted, username=EMAIL):
         resolwe = MagicMock()
-        resolwe.auth.username = "user@example.com"
+        resolwe.auth.username = username
+        resolwe._login.return_value = accepted
         with (
             patch.object(auth, "sign_in", return_value="tok"),
             patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
             Resolwe.login_with_auth0(resolwe)
         resolwe._login.assert_called_once_with(token="tok")
-        self.assertIn("Signed in to Resolwe as user@example.com.", stderr.getvalue())
+        return stderr.getvalue()
 
-    def test_does_not_claim_sign_in_when_account_is_unknown(self):
-        resolwe = MagicMock()
-        resolwe.auth.username = None
-        with (
-            patch.object(auth, "sign_in", return_value="tok"),
-            patch("sys.stderr", new_callable=io.StringIO) as stderr,
-        ):
-            Resolwe.login_with_auth0(resolwe)
-        self.assertNotIn("Signed in", stderr.getvalue())
-        self.assertIn("did not identify the account", stderr.getvalue())
+    def test_prints_signed_in_account(self):
+        self.assertIn(f"Signed in to Resolwe as {EMAIL}.", self._message(True))
+
+    def test_does_not_claim_sign_in_when_the_server_rejects_the_token(self):
+        message = self._message(False, username=None)
+        self.assertNotIn("Signed in", message)
+        self.assertIn("the server did not accept it", message)
+
+    def test_does_not_claim_sign_in_when_the_server_does_not_answer(self):
+        message = self._message(None)
+        self.assertNotIn("Signed in", message)
+        self.assertIn(EMAIL, message)
+        self.assertIn("the server did not confirm it", message)
 
 
 class TestLogin(unittest.TestCase):

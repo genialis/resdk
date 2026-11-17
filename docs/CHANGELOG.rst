@@ -24,7 +24,11 @@ Added
 - Sign in with ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` through
   Auth0's password grant on the server of the selected tenant
   (app.genialis.com or qa.genialis.io). Other servers, and servers that do
-  not accept Auth0 tokens yet, use the server's password login
+  not accept Auth0 tokens yet, use the server's password login. A server that
+  cannot be reached keeps the Auth0 token and does not get the password
+- With a bearer token, the username of the connection is the email the token
+  names, also when the server cannot be reached.
+  ``resdk.auth.Auth0Session.email`` returns it
 - Add ``resdk.auth.sign_in()``, which returns a renewed token for packages
   that do not connect to Resolwe
 - Add the ``skip_existing`` argument to the ``download`` methods of ``Data``,
