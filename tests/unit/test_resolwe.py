@@ -1020,7 +1020,7 @@ class TestResAuth(unittest.TestCase):
         # The URL is printed even when a browser was opened, which may fail
         # silently on a headless host; the code is printed on its own.
         self.assertIn("\nhttps://url.com/remote-auth/\n", message)
-        self.assertIn("\n123\n", message)
+        self.assertIn("\nCode: 123\n", message)
         self.assertNotIn("auth_id=", message)
         time_mock.sleep.assert_called_once_with(1)
         self.assertEqual(requests_mock.Session.return_value.get.call_count, 2)
@@ -1048,7 +1048,7 @@ class TestResAuth(unittest.TestCase):
         ResAuth.interactive_login(self.auth_mock)
         message = print_mock.call_args.args[0]
         self.assertIn("\nhttps://url.com/remote-auth/\n", message)
-        self.assertIn("\n123\n", message)
+        self.assertIn("\nCode: 123\n", message)
         self.assertNotIn("auth_id=", message)
 
     @patch("resdk.resolwe.requests")

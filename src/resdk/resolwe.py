@@ -967,7 +967,7 @@ class ResAuth(requests.auth.AuthBase):
             message = "Browser could not be automatically opened."
         message += (
             " Enter the code below at the following URL:\n\n"
-            f"{self.interactive_login_url}\n\n{auth_id}\n"
+            f"{self.interactive_login_url}\n\nCode: {auth_id}\n"
         )
 
         # Do not use logger here, because we want the url to be visible even if logging
