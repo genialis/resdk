@@ -988,6 +988,31 @@ class TestResAuth(unittest.TestCase):
         )
         self.auth_mock.interactive_login.assert_called_once_with()
 
+    def _mock_auth_id(self, requests_mock):
+        """Make the auth-id endpoint return a code and a secret poll token.
+
+        The polling session gets a real cookie jar, so tests can check which
+        requests the cookies would be sent with.
+        """
+        requests_mock.get.return_value = MagicMock(
+            status_code=200,
+            **{
+                "json.return_value": {
+                    "auth_id": "ABCDE-12345",
+                    "poll_token": "secret-poll-token",
+                }
+            },
+        )
+        requests_mock.Session.return_value.cookies = (
+            requests.cookies.RequestsCookieJar()
+        )
+
+    def _cookie_header(self, jar, url):
+        """Return the Cookie header the jar would send with a GET to the URL."""
+        return requests.cookies.get_cookie_header(
+            jar, requests.Request("GET", url).prepare()
+        )
+
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.webbrowser")
     @patch("resdk.resolwe.print")
@@ -995,10 +1020,9 @@ class TestResAuth(unittest.TestCase):
     def test_interactive_login(
         self, time_mock, print_mock, webbrowser_mock, requests_mock
     ):
-        requests_mock.get.return_value = MagicMock(
-            status_code=200, **{"json.return_value": {"auth_id": "123"}}
-        )
-        requests_mock.Session.return_value.get.side_effect = [
+        self._mock_auth_id(requests_mock)
+        session = requests_mock.Session.return_value
+        session.get.side_effect = [
             MagicMock(status_code=204),
             MagicMock(
                 status_code=200,
@@ -1011,22 +1035,60 @@ class TestResAuth(unittest.TestCase):
             ResAuth.interactive_login(self.auth_mock),
             {"csrftoken": "my-token", "sessionid": "my-id"},
         )
-        webbrowser_mock.open.assert_called_once_with("https://url.com/remote-auth/")
+        prefilled_url = "https://url.com/remote-auth/?auth_id=ABCDE-12345"
+        webbrowser_mock.open.assert_called_once_with(prefilled_url)
         requests_mock.get.assert_called_once_with(
             "https://url.com/remote-auth/auth-id/"
         )
         print_mock.assert_called_once()
         message = print_mock.call_args.args[0]
+        self.assertTrue(
+            message.startswith(
+                "A browser window should have opened. If it did not, open this URL:"
+            )
+        )
         # The URL is printed even when a browser was opened, which may fail
         # silently on a headless host; the code is printed on its own.
-        self.assertIn("\nhttps://url.com/remote-auth/\n", message)
-        self.assertIn("\nCode: 123\n", message)
-        self.assertNotIn("auth_id=", message)
-        time_mock.sleep.assert_called_once_with(1)
-        self.assertEqual(requests_mock.Session.return_value.get.call_count, 2)
-        requests_mock.Session.return_value.get.assert_called_with(
-            "https://url.com/remote-auth/poll/"
+        self.assertIn(f"\n{prefilled_url}\n", message)
+        self.assertIn("\nCode: ABCDE-12345\n", message)
+        self.assertIn("Check that the page shows this code", message)
+        self.assertIn("confirm only a login you started", message)
+        # Both cookies are sent with every poll.
+        self.assertEqual(
+            self._cookie_header(session.cookies, "https://url.com/remote-auth/poll/"),
+            "auth_id=ABCDE-12345; poll_token=secret-poll-token",
         )
+        time_mock.sleep.assert_called_once_with(1)
+        self.assertEqual(session.get.call_count, 2)
+        session.get.assert_called_with("https://url.com/remote-auth/poll/")
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_never_exposes_poll_token(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        self.auth_mock.logger = MagicMock()
+        self._mock_auth_id(requests_mock)
+        requests_mock.Session.return_value.get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(
+                return_value={"csrftoken": "my-token", "sessionid": "my-id"}
+            ),
+        )
+        ResAuth.interactive_login(self.auth_mock)
+        webbrowser_mock.open.assert_called_once()
+        print_mock.assert_called_once()
+        # The token is sent only as a cookie: never shown, logged, opened in
+        # the browser, or put in a URL.
+        for mock in (
+            webbrowser_mock.open,
+            print_mock,
+            self.auth_mock.logger,
+            requests_mock.Session.return_value.get,
+        ):
+            self.assertNotIn("secret-poll-token", str(mock.mock_calls))
 
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.webbrowser")
@@ -1036,9 +1098,7 @@ class TestResAuth(unittest.TestCase):
         self, time_mock, print_mock, webbrowser_mock, requests_mock
     ):
         webbrowser_mock.open.return_value = False
-        requests_mock.get.return_value = MagicMock(
-            status_code=200, **{"json.return_value": {"auth_id": "123"}}
-        )
+        self._mock_auth_id(requests_mock)
         requests_mock.Session.return_value.get.return_value = MagicMock(
             status_code=200,
             json=MagicMock(
@@ -1047,9 +1107,166 @@ class TestResAuth(unittest.TestCase):
         )
         ResAuth.interactive_login(self.auth_mock)
         message = print_mock.call_args.args[0]
-        self.assertIn("\nhttps://url.com/remote-auth/\n", message)
-        self.assertIn("\nCode: 123\n", message)
-        self.assertNotIn("auth_id=", message)
+        self.assertTrue(message.startswith("Open this URL in a browser:"))
+        self.assertNotIn("should have opened", message)
+        self.assertIn("\nhttps://url.com/remote-auth/?auth_id=ABCDE-12345\n", message)
+        self.assertIn("\nCode: ABCDE-12345\n", message)
+        self.assertIn("Check that the page shows this code", message)
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_scopes_cookies_to_poll_host(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        cases = [
+            ("https://url.com/remote-auth/", True),
+            ("http://url.com/remote-auth/", False),
+        ]
+        for login_url, secure in cases:
+            with self.subTest(login_url=login_url):
+                self.auth_mock.interactive_login_url = login_url
+                self._mock_auth_id(requests_mock)
+                session = requests_mock.Session.return_value
+                session.get.return_value = MagicMock(
+                    status_code=200,
+                    json=MagicMock(
+                        return_value={"csrftoken": "my-token", "sessionid": "my-id"}
+                    ),
+                )
+                ResAuth.interactive_login(self.auth_mock)
+
+                jar = session.cookies
+                self.assertEqual(
+                    sorted(cookie.name for cookie in jar), ["auth_id", "poll_token"]
+                )
+                for cookie in jar:
+                    self.assertEqual(cookie.domain, "url.com")
+                    self.assertEqual(cookie.path, "/")
+                    self.assertEqual(cookie.secure, secure)
+
+                poll_url = f"{login_url}poll/"
+                self.assertIn("poll_token=", self._cookie_header(jar, poll_url))
+                # Never sent to another host, for example a redirect target.
+                for other_url in (
+                    "https://other.example/remote-auth/poll/",
+                    "https://url.com.other.example/",
+                ):
+                    self.assertIsNone(self._cookie_header(jar, other_url))
+                if secure:
+                    # Never sent over plain HTTP when polling over HTTPS.
+                    self.assertIsNone(
+                        self._cookie_header(jar, "http://url.com/remote-auth/poll/")
+                    )
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_poll_errors(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        cases = [
+            (400, {"detail": "Missing poll_token."}, "status 400: Missing poll_token."),
+            (403, {"detail": "Invalid poll token."}, "status 403: Invalid poll token."),
+            (410, {"detail": "Unknown or expired code."}, "code has expired"),
+        ]
+        for status_code, body, expected in cases:
+            with self.subTest(status_code=status_code):
+                self._mock_auth_id(requests_mock)
+                requests_mock.Session.return_value.get.return_value = MagicMock(
+                    status_code=status_code, **{"json.return_value": body}
+                )
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    ResAuth.interactive_login(self.auth_mock)
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_poll_error_without_json(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        self._mock_auth_id(requests_mock)
+        requests_mock.Session.return_value.get.return_value = MagicMock(
+            status_code=502, **{"json.side_effect": ValueError("not JSON")}
+        )
+        with self.assertRaisesRegex(RuntimeError, r"\(status 502\)"):
+            ResAuth.interactive_login(self.auth_mock)
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    def test_interactive_login_auth_id_error(
+        self, print_mock, webbrowser_mock, requests_mock
+    ):
+        requests_mock.get.return_value = MagicMock(
+            status_code=429,
+            **{"json.return_value": {"detail": "Request was throttled."}},
+        )
+        with self.assertRaisesRegex(RuntimeError, "status 429: Request was throttled."):
+            ResAuth.interactive_login(self.auth_mock)
+        webbrowser_mock.open.assert_not_called()
+        print_mock.assert_not_called()
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    def test_interactive_login_auth_id_malformed_response(
+        self, print_mock, webbrowser_mock, requests_mock
+    ):
+        cases = [
+            ("HTML body", {"json.side_effect": ValueError("not JSON")}),
+            ("JSON list", {"json.return_value": ["ABCDE-12345"]}),
+            ("no auth_id", {"json.return_value": {"poll_token": "secret-poll-token"}}),
+        ]
+        for name, json_mock in cases:
+            with self.subTest(name):
+                requests_mock.get.return_value = MagicMock(status_code=200, **json_mock)
+                with self.assertRaisesRegex(
+                    RuntimeError, r"unexpected response .*\(status 200\)"
+                ):
+                    ResAuth.interactive_login(self.auth_mock)
+                webbrowser_mock.open.assert_not_called()
+                print_mock.assert_not_called()
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    @patch("resdk.resolwe.time")
+    def test_interactive_login_poll_malformed_response(
+        self, time_mock, print_mock, webbrowser_mock, requests_mock
+    ):
+        cases = [
+            ("HTML body", {"json.side_effect": ValueError("not JSON")}),
+            ("JSON list", {"json.return_value": ["my-id"]}),
+            ("no csrftoken", {"json.return_value": {"sessionid": "my-id"}}),
+        ]
+        for name, json_mock in cases:
+            with self.subTest(name):
+                self._mock_auth_id(requests_mock)
+                requests_mock.Session.return_value.get.return_value = MagicMock(
+                    status_code=200, **json_mock
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, r"unexpected response .*\(status 200\)"
+                ):
+                    ResAuth.interactive_login(self.auth_mock)
+
+    @patch("resdk.resolwe.requests")
+    @patch("resdk.resolwe.webbrowser")
+    @patch("resdk.resolwe.print")
+    def test_interactive_login_server_without_poll_token(
+        self, print_mock, webbrowser_mock, requests_mock
+    ):
+        requests_mock.get.return_value = MagicMock(
+            status_code=200, **{"json.return_value": {"auth_id": "ABCDE-12345"}}
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not support"):
+            ResAuth.interactive_login(self.auth_mock)
+        webbrowser_mock.open.assert_not_called()
+        print_mock.assert_not_called()
 
     @patch("resdk.resolwe.requests")
     def test_automatic_login(self, requests_mock):

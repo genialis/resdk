@@ -53,6 +53,9 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
 
   The ``login()`` call will perform interactive login in a web browser. If you
   wish to log in as a different user, open the link in an incognito window.
+  The page shows the login code pre-filled: check that it matches the code
+  ReSDK printed, and confirm only a login you started. Interactive login needs
+  a server version that supports the poll token.
 
 .. note::
 

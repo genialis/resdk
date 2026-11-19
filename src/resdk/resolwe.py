@@ -23,7 +23,7 @@ from contextlib import suppress
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Dict, Iterable, Optional, TypedDict, Union
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
 import slumber
@@ -840,6 +840,19 @@ class Resolwe:
         return self.api.base.data_usage.get(**query_params)
 
 
+def _describe_error(response: requests.Response) -> str:
+    """Return the status code and, if the body is JSON, the server's detail."""
+    description = f"status {response.status_code}"
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        # The body is not JSON, or not a JSON object.
+        detail = None
+    if detail:
+        description += f": {detail}"
+    return description
+
+
 class AuthCookie(TypedDict):
     """Authentication cookie dict."""
 
@@ -952,22 +965,52 @@ class ResAuth(requests.auth.AuthBase):
     def interactive_login(self, polling_interval: int = 1) -> AuthCookie:
         """Prompt user to log in with a web browser.
 
-        :returns: authentication cookie dict on success, None on failure.
+        :returns: authentication cookie dict on success.
+        :raises RuntimeError: if the server does not issue a code and a poll
+            token, or if the login fails or the code expires.
         """
         auth_id_url = urljoin(self.interactive_login_url, "auth-id/")
-        auth_id = requests.get(auth_id_url).json()["auth_id"]
+        response = requests.get(auth_id_url)
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Interactive login failed: could not get a login code "
+                f"({_describe_error(response)})."
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and "poll_token" not in payload:
+            raise RuntimeError(
+                "Interactive login failed: the server does not support this "
+                "version of ReSDK's interactive login."
+            )
+        if not isinstance(payload, dict) or "auth_id" not in payload:
+            raise RuntimeError(
+                "Interactive login failed: unexpected response to a login code "
+                f"request ({_describe_error(response)})."
+            )
+        auth_id = payload["auth_id"]
+        poll_token = payload["poll_token"]
 
-        # Never put the auth_id in the URL: newer servers ignore a code given in
-        # the link, so the user types it.
+        # The code may appear in a URL, browser history, and process lists:
+        # alone it cannot collect the session, because the poll also needs the
+        # secret poll token that only this process holds. Never print, log, or
+        # pass the poll token to the browser.
+        login_url = urlparse(self.interactive_login_url)
+        login_url = login_url._replace(query=urlencode({"auth_id": auth_id})).geturl()
         # Always print the URL: webbrowser.open returns True as soon as a helper
         # such as xdg-open starts, even if no window ever appears.
-        if webbrowser.open(self.interactive_login_url):
-            message = "A browser window should open."
+        if webbrowser.open(login_url):
+            message = (
+                "A browser window should have opened. If it did not, open this URL:"
+            )
         else:
-            message = "Browser could not be automatically opened."
+            message = "Open this URL in a browser:"
         message += (
-            " Enter the code below at the following URL:\n\n"
-            f"{self.interactive_login_url}\n\nCode: {auth_id}\n"
+            f"\n\n{login_url}\n\nCode: {auth_id}\n\n"
+            "Check that the page shows this code, and confirm only a login you "
+            "started.\n"
         )
 
         # Do not use logger here, because we want the url to be visible even if logging
@@ -976,20 +1019,43 @@ class ResAuth(requests.auth.AuthBase):
 
         poll_url = urljoin(self.interactive_login_url, "poll/")
         session = requests.Session()
-        session.cookies.set("auth_id", auth_id)
+        # Scope the cookies to the poll host's domain so the session never
+        # sends them to another domain, for example a redirect target.
+        parsed_poll_url = urlparse(poll_url)
+        cookie_scope = {
+            "domain": parsed_poll_url.hostname,
+            "path": "/",
+            "secure": parsed_poll_url.scheme == "https",
+        }
+        session.cookies.set("auth_id", auth_id, **cookie_scope)
+        session.cookies.set("poll_token", poll_token, **cookie_scope)
         response = session.get(poll_url)
         while response.status_code == 204:
             time.sleep(polling_interval)
             response = session.get(poll_url)
 
-        cookie_dict = response.json()
+        if response.status_code == 410:
+            raise RuntimeError(
+                "Interactive login failed: the code has expired. Log in again."
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Interactive login failed ({_describe_error(response)})."
+            )
 
+        try:
+            cookie_dict = response.json()
+        except ValueError:
+            cookie_dict = None
         if (
-            response.status_code != 200
+            not isinstance(cookie_dict, dict)
             or "sessionid" not in cookie_dict
             or "csrftoken" not in cookie_dict
         ):
-            raise RuntimeError("Interactive login failed.")
+            raise RuntimeError(
+                "Interactive login failed: unexpected response to the poll "
+                f"({_describe_error(response)})."
+            )
 
         return cookie_dict
 

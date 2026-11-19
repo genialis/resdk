@@ -45,9 +45,11 @@ Added
 
 Fixed
 -----
-- Print the interactive-login code on its own instead of in a URL that
-  pre-fills it, because newer servers no longer pre-fill the code from a
-  link. Always print the login URL, also when a browser is opened
+- Interactive login sends a secret poll token with the code, so a leaked code
+  cannot collect the session. It opens and always prints a URL that pre-fills
+  the code, prints the code to check against the page, and reports why a
+  login failed or that the code expired. It no longer sends the poll cookies
+  to other domains, such as redirect targets
 - Raise an error if a user calls the download method
   on a data object and inputs a non-existing file or field name
 - Query reads objects in batches in ``QCTables`` to avoid exceeding the URL
@@ -58,6 +60,8 @@ Fixed
 
 Changed
 -------
+- Interactive login requires a server that issues a poll token with the login
+  code and fails right away on older servers
 - Remove the ``pandas<3.0.0`` requirement. The relation columns of the
   metadata table are filled in a way that works under pandas 3 and no longer
   warns on pandas 2.2 and later, and the percentage columns of the MACS2
