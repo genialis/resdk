@@ -4,9 +4,9 @@ Change Log
 
 All notable changes to this project are documented in this file.
 
-==========
-Unreleased
-==========
+===================
+23.0.0 - 2026-11-27
+===================
 
 Added
 -----
