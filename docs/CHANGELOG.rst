@@ -48,8 +48,8 @@ Fixed
 - Interactive login sends a secret poll token with the code, so a leaked code
   cannot collect the session. It opens and always prints a URL that pre-fills
   the code, prints the code to check against the page, and reports why a
-  login failed or that the code expired. It no longer sends the poll cookies
-  to other domains, such as redirect targets
+  login failed or that the code expired. It sends the poll cookies only to
+  the poll URL and does not follow redirects from it
 - Raise an error if a user calls the download method
   on a data object and inputs a non-existing file or field name
 - Query reads objects in batches in ``QCTables`` to avoid exceeding the URL

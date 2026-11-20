@@ -1018,21 +1018,19 @@ class ResAuth(requests.auth.AuthBase):
         print(message)
 
         poll_url = urljoin(self.interactive_login_url, "poll/")
-        session = requests.Session()
-        # Scope the cookies to the poll host's domain so the session never
-        # sends them to another domain, for example a redirect target.
-        parsed_poll_url = urlparse(poll_url)
-        cookie_scope = {
-            "domain": parsed_poll_url.hostname,
-            "path": "/",
-            "secure": parsed_poll_url.scheme == "https",
-        }
-        session.cookies.set("auth_id", auth_id, **cookie_scope)
-        session.cookies.set("poll_token", poll_token, **cookie_scope)
-        response = session.get(poll_url)
+        # Send the cookies as a header on each poll instead of through a cookie
+        # jar: the jar never sends a cookie scoped to a dotless host such as
+        # localhost, a Docker service name or [::1], and an unscoped cookie
+        # would go to every host. requests drops a manual Cookie header on a
+        # redirect, and with redirects off a 3xx fails below, so the poll token
+        # never reaches another host.
+        poll_headers = {"Cookie": f"auth_id={auth_id}; poll_token={poll_token}"}
+        response = requests.get(poll_url, headers=poll_headers, allow_redirects=False)
         while response.status_code == 204:
             time.sleep(polling_interval)
-            response = session.get(poll_url)
+            response = requests.get(
+                poll_url, headers=poll_headers, allow_redirects=False
+            )
 
         if response.status_code == 410:
             raise RuntimeError(
