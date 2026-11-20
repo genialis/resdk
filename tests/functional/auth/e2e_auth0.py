@@ -14,13 +14,15 @@ The tests need a deploy with bearer authentication enabled and a tenant in
     pytest tests/functional/auth/e2e_auth0.py
 
 The user must have an Auth0 password, no MFA, and the ``expressions:api``
-scope (through the ``Expressions API user`` role or a verified
-``@genialis.com`` address). The tests are skipped when the selected tenant
-does not serve ``SERVER_URL``, as on a local server. Set
-``RESDK_E2E_REQUIRE_AUTH0=1`` to fail instead of skipping.
+scope. ``USER_EMAIL`` and ``USER_PASSWORD`` must be set: the defaults of the
+other functional tests are never sent to Auth0. The tests are skipped when
+the selected tenant does not serve ``SERVER_URL``, as on a local server, or
+when the credentials are not set. Set ``RESDK_E2E_REQUIRE_AUTH0=1`` to fail
+instead of skipping.
 """
 
 import dataclasses
+import functools
 import os
 import unittest
 from urllib.parse import urljoin
@@ -49,6 +51,11 @@ def _settings_for_url():
 SETTINGS = _settings_for_url()
 
 
+#: Set only when the credentials are given explicitly, so the defaults of the
+#: other functional tests never reach Auth0.
+CREDENTIALS_SET = bool(os.environ.get("USER_EMAIL") and os.environ.get("USER_PASSWORD"))
+
+
 def _skip_or_fail(test, message):
     """Skip the test, or fail it when ``RESDK_E2E_REQUIRE_AUTH0`` is set."""
     if REQUIRE_AUTH0:
@@ -62,15 +69,24 @@ def _token_response(scope):
     return auth._password_sign_in(settings, USER_EMAIL, USER_PASSWORD)
 
 
+@functools.cache
+def _default_tokens():
+    """Return Auth0's response for the default scope, signing in once."""
+    return _token_response(auth.DEFAULT_SCOPE)
+
+
 def _current_user(token):
     """Request the current user with ``token`` as the bearer credential."""
     headers = {} if token is None else {"Authorization": f"Bearer {token}"}
-    return requests.get(
-        urljoin(URL, CURRENT_USER_POSTFIX),
-        params={"current_only": "1"},
-        headers=headers,
-        timeout=30,
-    )
+    with requests.Session() as session:
+        # Without this, credentials from ~/.netrc replace the header.
+        session.trust_env = False
+        return session.get(
+            urljoin(URL, CURRENT_USER_POSTFIX),
+            params={"current_only": "1"},
+            headers=headers,
+            timeout=30,
+        )
 
 
 def _emails(response):
@@ -79,13 +95,6 @@ def _emails(response):
 
 
 class TestAuth0Bearer(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.tokens = None
-        if SETTINGS is not None:
-            cls.tokens = _token_response(auth.DEFAULT_SCOPE)
-
     def setUp(self):
         if SETTINGS is None:
             _skip_or_fail(
@@ -93,6 +102,8 @@ class TestAuth0Bearer(unittest.TestCase):
                 f"No Auth0 tenant serves {URL}; set SERVER_URL and "
                 f"{auth.TENANT_ENV_VAR} to a deploy with bearer authentication.",
             )
+        if not CREDENTIALS_SET:
+            _skip_or_fail(self, "Set USER_EMAIL and USER_PASSWORD.")
 
     def assert_invalid_token_response(self, response):
         """Check the answer to a token the server must not accept.
@@ -122,7 +133,7 @@ class TestAuth0Bearer(unittest.TestCase):
         self.assertEqual(_emails(response), [])
 
     def test_tampered_token_is_rejected(self):
-        header, payload, signature = self.tokens["access_token"].split(".")
+        header, payload, signature = _default_tokens()["access_token"].split(".")
         # Change a character in the middle of the signature. The last character
         # holds only the final bits of the signature, so changing it can decode
         # to the same bytes and leave the token valid.
@@ -137,7 +148,7 @@ class TestAuth0Bearer(unittest.TestCase):
     def test_id_token_is_rejected(self):
         # A genuine token from the tenant, but issued for the client, not for
         # the API: invalid (401), not a valid token without the scope (403).
-        response = _current_user(self.tokens["id_token"])
+        response = _current_user(_default_tokens()["id_token"])
 
         self.assert_invalid_token_response(response)
 
