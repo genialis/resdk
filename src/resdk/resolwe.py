@@ -840,6 +840,19 @@ class Resolwe:
         return self.api.base.data_usage.get(**query_params)
 
 
+def _describe_error(response: requests.Response) -> str:
+    """Return the status code and, if the body is JSON, the server's detail."""
+    description = f"status {response.status_code}"
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        # The body is not JSON, or not a JSON object.
+        detail = None
+    if detail:
+        description += f": {detail}"
+    return description
+
+
 class AuthCookie(TypedDict):
     """Authentication cookie dict."""
 
@@ -952,51 +965,95 @@ class ResAuth(requests.auth.AuthBase):
     def interactive_login(self, polling_interval: int = 1) -> AuthCookie:
         """Prompt user to log in with a web browser.
 
-        :returns: authentication cookie dict on success, None on failure.
+        :returns: authentication cookie dict on success.
+        :raises RuntimeError: if the server does not issue a code and a poll
+            token, or if the login fails or the code expires.
         """
         auth_id_url = urljoin(self.interactive_login_url, "auth-id/")
-        auth_id = requests.get(auth_id_url).json()["auth_id"]
+        response = requests.get(auth_id_url)
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Interactive login failed: could not get a login code "
+                f"({_describe_error(response)})."
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and "poll_token" not in payload:
+            raise RuntimeError(
+                "Interactive login failed: the server does not support this "
+                "version of ReSDK's interactive login."
+            )
+        if not isinstance(payload, dict) or "auth_id" not in payload:
+            raise RuntimeError(
+                "Interactive login failed: unexpected response to a login code "
+                f"request ({_describe_error(response)})."
+            )
+        auth_id = payload["auth_id"]
+        poll_token = payload["poll_token"]
 
-        # Use login url without the auth_id, as the system call could be intercepted.
-        browser_opened = webbrowser.open(self.interactive_login_url)
-        login_url_with_auth_id = (
-            urlparse(self.interactive_login_url)
-            ._replace(query=urlencode({"auth_id": auth_id}))
-            .geturl()
+        # The code may appear in a URL, browser history, and process lists:
+        # alone it cannot collect the session, because the poll also needs the
+        # secret poll token that only this process holds. Never print, log, or
+        # pass the poll token to the browser.
+        login_url = urlparse(self.interactive_login_url)
+        login_url = login_url._replace(query=urlencode({"auth_id": auth_id})).geturl()
+        # Always print the URL: webbrowser.open returns True as soon as a helper
+        # such as xdg-open starts, even if no window ever appears.
+        if webbrowser.open(login_url):
+            message = (
+                "A browser window should have opened. If it did not, open this URL:"
+            )
+        else:
+            message = "Open this URL in a browser:"
+        message += (
+            f"\n\n{login_url}\n\nCode: {auth_id}\n\n"
+            "Check that the page shows this code, and confirm only a login you "
+            "started.\n"
         )
-        message_automatic = f"""Enter the following code in the opened browser window:
-
-{auth_id}
-
-Alternatively, you may visit the following URL which will autofill the code upon loading:
-{login_url_with_auth_id}\n"""
-        message_not_automatic = f"""Open the following URL which will autofill the code upon loading:
-
-{login_url_with_auth_id}\n"""
-
-        message = f"Browser {'could not' if not browser_opened else 'will'} be automatically opened.\n"
-        message += message_automatic if browser_opened else message_not_automatic
 
         # Do not use logger here, because we want the url to be visible even if logging
         # is disabled.
         print(message)
 
         poll_url = urljoin(self.interactive_login_url, "poll/")
-        session = requests.Session()
-        session.cookies.set("auth_id", auth_id)
-        response = session.get(poll_url)
+        # Send the cookies as a header on each poll instead of through a cookie
+        # jar: the jar never sends a cookie scoped to a dotless host such as
+        # localhost, a Docker service name or [::1], and an unscoped cookie
+        # would go to every host. requests drops a manual Cookie header on a
+        # redirect, and with redirects off a 3xx fails below, so the poll token
+        # never reaches another host.
+        poll_headers = {"Cookie": f"auth_id={auth_id}; poll_token={poll_token}"}
+        response = requests.get(poll_url, headers=poll_headers, allow_redirects=False)
         while response.status_code == 204:
             time.sleep(polling_interval)
-            response = session.get(poll_url)
+            response = requests.get(
+                poll_url, headers=poll_headers, allow_redirects=False
+            )
 
-        cookie_dict = response.json()
+        if response.status_code == 410:
+            raise RuntimeError(
+                "Interactive login failed: the code has expired. Log in again."
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Interactive login failed ({_describe_error(response)})."
+            )
 
+        try:
+            cookie_dict = response.json()
+        except ValueError:
+            cookie_dict = None
         if (
-            response.status_code != 200
+            not isinstance(cookie_dict, dict)
             or "sessionid" not in cookie_dict
             or "csrftoken" not in cookie_dict
         ):
-            raise RuntimeError("Interactive login failed.")
+            raise RuntimeError(
+                "Interactive login failed: unexpected response to the poll "
+                f"({_describe_error(response)})."
+            )
 
         return cookie_dict
 
