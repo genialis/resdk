@@ -309,7 +309,7 @@ class Auth0Session:
     def _refresh(self) -> None:
         """Trade the refresh token for a new pair; the caller holds the lock.
 
-        The request names the scope again: a scope that an Auth0 rule grants
+        The request names the scope again: a scope that an Auth0 Action grants
         only when the request asks for it would otherwise be missing from the
         renewed token.
         """
