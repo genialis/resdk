@@ -61,7 +61,8 @@ Fixed
 Changed
 -------
 - Interactive login requires a server that issues a poll token with the login
-  code and fails right away on older servers
+  code and fails right away on older servers. To log in interactively to an
+  older server, use ReSDK 22.3 or earlier, or log in with a token or password
 - Remove the ``pandas<3.0.0`` requirement. The relation columns of the
   metadata table are filled in a way that works under pandas 3 and no longer
   warns on pandas 2.2 and later, and the percentage columns of the MACS2
