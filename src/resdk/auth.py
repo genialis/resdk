@@ -307,7 +307,12 @@ class Auth0Session:
             return self._access_token != rejected
 
     def _refresh(self) -> None:
-        """Trade the refresh token for a new pair; the caller holds the lock."""
+        """Trade the refresh token for a new pair; the caller holds the lock.
+
+        The request names the scope again: a scope that an Auth0 Action grants
+        only when the request asks for it would otherwise be missing from the
+        renewed token.
+        """
         assert self.settings is not None and self._refresh_token is not None
         response = requests.post(
             f"https://{self.settings.domain}/oauth/token",
@@ -315,6 +320,7 @@ class Auth0Session:
                 "grant_type": "refresh_token",
                 "client_id": self.settings.client_id,
                 "refresh_token": self._refresh_token,
+                "scope": self.settings.scope,
             },
             timeout=30,
         )

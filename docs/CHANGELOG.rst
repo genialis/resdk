@@ -20,7 +20,9 @@ Added
   Authorization Flow. ``RESDK_AUTH0_TENANT`` selects the tenant:
   ``production`` (default) or ``test``
 - Renew Auth0 access tokens in memory with a refresh token, before they
-  expire and once after a 401, for up to 7 days
+  expire and once after a 401, for up to 7 days. The renewal asks for the
+  same scopes as the sign-in, so a scope that an Auth0 Action grants only when
+  the request names it is kept
 - Sign in with ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` through
   Auth0's password grant on the server of the selected tenant
   (app.genialis.com or qa.genialis.io). Other servers, and servers that do

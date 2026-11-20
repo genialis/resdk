@@ -678,7 +678,31 @@ class TestAuth0Session(unittest.TestCase):
         )
         self.assertEqual(
             post.call_args.kwargs["data"],
-            {"grant_type": "refresh_token", "client_id": "cid", "refresh_token": "r1"},
+            {
+                "grant_type": "refresh_token",
+                "client_id": "cid",
+                "refresh_token": "r1",
+                "scope": auth.DEFAULT_SCOPE,
+            },
+        )
+
+    def test_refresh_asks_for_the_scope_of_the_session(self):
+        # Auth0 rules that grant a scope only when the request names it would
+        # otherwise leave it out of the renewed token.
+        settings = auth.Auth0Settings(
+            domain="example.auth0.com",
+            client_id="cid",
+            audience="https://api.example",
+            scope="openid offline_access custom:scope",
+        )
+        session = auth.Auth0Session.from_token_response(
+            {"access_token": "a1", "refresh_token": "r1", "expires_in": 0}, settings
+        )
+        renewed = _token_response(access_token="a2", refresh_token="r2", expires_in=600)
+        with patch.object(auth.requests, "post", return_value=renewed) as post:
+            self.assertEqual(session.access_token, "a2")
+        self.assertEqual(
+            post.call_args.kwargs["data"]["scope"], "openid offline_access custom:scope"
         )
 
     def test_rotated_refresh_token_is_kept(self):
