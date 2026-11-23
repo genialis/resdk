@@ -238,6 +238,15 @@ class Auth0Session:
             settings=settings,
         )
 
+    def __deepcopy__(self, memo: dict) -> "Auth0Session":
+        """Return this session: a copy would sign in on its own.
+
+        Resources deep-copy their payload, which can hold a resource and
+        through it the connection and this session. Auth0 rotates the refresh
+        token on every use, so two copies would invalidate each other's.
+        """
+        return self
+
     @property
     def can_refresh(self) -> bool:
         """Whether the session holds a refresh token and the settings to use it."""
