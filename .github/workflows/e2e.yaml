@@ -24,7 +24,15 @@ jobs:
 
       - name: Import the environment from file
         run: |
-          grep -Ev ^'(#|$)' ${{ env.ENV_FILE }} >> $GITHUB_ENV
+          # The logs of this public repository show the environment of every
+          # later step, so mask the passwords before they reach $GITHUB_ENV.
+          set -o pipefail
+          grep -Ev '^(#|$)' "$ENV_FILE" | while IFS= read -r line; do
+            case "${line%%=*}" in
+              *PASSWORD) echo "::add-mask::${line#*=}" ;;
+            esac
+            printf '%s\n' "$line" >> "$GITHUB_ENV"
+          done
 
       - name: Install ReSDK and its testing dependencies
         run: |
@@ -149,4 +157,4 @@ jobs:
         run: |
           # Make sure `python` refers to the tox environment's Python
           uv run pytest --cov=resdk --cov-report=xml:.reports/resdk_e2e_cov.xml \
-            --junit-xml=.reports/resdk_e2e_report.xml tests/functional/**/e2e_*.py
+            --junit-xml=.reports/resdk_e2e_report.xml -rs tests/functional/**/e2e_*.py

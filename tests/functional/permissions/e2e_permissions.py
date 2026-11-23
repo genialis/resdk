@@ -1,6 +1,6 @@
 from resdk.exceptions import ResolweServerError
 
-from ..base import ADMIN_EMAIL, USER_EMAIL, BaseResdkFunctionalTest
+from ..base import USER_EMAIL, BaseResdkFunctionalTest
 
 
 class TestPermissions(BaseResdkFunctionalTest):
@@ -46,15 +46,18 @@ class TestPermissions(BaseResdkFunctionalTest):
     def test_get_holders_with_perm(self):
         self.test_collection.permissions.set_user(USER_EMAIL, "edit")
         self.test_collection.permissions.set_public("view")
+        # The admin has no full name, so the server names it by its username,
+        # which is the one the account was created with, not its email.
+        admin_name = self.res.user.get(current_only=True).username
 
         self.assertEqual(len(self.test_collection.permissions.owners), 1)
         self.assertEqual(
-            self.test_collection.permissions.owners[0].get_name(), ADMIN_EMAIL
+            self.test_collection.permissions.owners[0].get_name(), admin_name
         )
 
         self.assertEqual(len(self.test_collection.permissions.editors), 2)
         self.assertEqual(
-            self.test_collection.permissions.editors[0].get_name(), ADMIN_EMAIL
+            self.test_collection.permissions.editors[0].get_name(), admin_name
         )
         self.assertEqual(
             self.test_collection.permissions.editors[1].get_name(), "E2E Tester"
@@ -62,7 +65,7 @@ class TestPermissions(BaseResdkFunctionalTest):
 
         self.assertEqual(len(self.test_collection.permissions.viewers), 3)
         self.assertEqual(
-            self.test_collection.permissions.viewers[0].first_name, ADMIN_EMAIL
+            self.test_collection.permissions.viewers[0].first_name, admin_name
         )
 
         self.assertEqual(

@@ -1,6 +1,6 @@
 import resdk
 
-from ..base import ADMIN_EMAIL, USER_EMAIL, BaseResdkFunctionalTest
+from ..base import BaseResdkFunctionalTest
 
 
 class TestRun(BaseResdkFunctionalTest):
@@ -75,5 +75,13 @@ class TestDataUsage(BaseResdkFunctionalTest):
     def test_ordering(self):
         usage_info = self.res.data_usage(ordering=["-username"])
         self.assertEqual(len(usage_info), 2)
-        self.assertEqual(usage_info[0]["username"], ADMIN_EMAIL)
-        self.assertEqual(usage_info[1]["username"], USER_EMAIL)
+        # The usernames are the ones the accounts were created with, not the
+        # emails, so read them from the server.
+        usernames = [
+            connection.user.get(current_only=True).username
+            for connection in (self.res, self.user_res)
+        ]
+        self.assertEqual(
+            [usage["username"] for usage in usage_info],
+            sorted(usernames, reverse=True),
+        )
