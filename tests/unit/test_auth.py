@@ -1,6 +1,7 @@
 """Unit tests for bearer-token / Auth0 authentication."""
 
 import base64
+import copy
 import io
 import json
 import socket
@@ -659,6 +660,12 @@ class TestAuth0Session(unittest.TestCase):
             {"access_token": "a1", "refresh_token": "r1", "expires_in": expires_in},
             SETTINGS,
         )
+
+    def test_deep_copy_keeps_the_session(self):
+        session = self._session()
+        # A resource in a payload holds its connection, and with it the session.
+        connection = ResAuth(url="https://example.org", token=session)
+        self.assertIs(copy.deepcopy({"auth": connection})["auth"].tokens, session)
 
     def test_valid_token_is_not_refreshed(self):
         session = self._session()
