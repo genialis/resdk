@@ -1,3 +1,6 @@
+import asyncio
+import shutil
+import tempfile
 import unittest
 from datetime import datetime
 from io import StringIO
@@ -627,6 +630,65 @@ class TestFetch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, 401)
         self.assertNotIn("secret-token", repr(raised.exception))
         self.assertNotIn("sessionid", repr(raised.exception))
+
+
+class WideTables(BaseTables):
+    """Minimal table class with the default wide table assembly."""
+
+    process_type = "data:test:"
+    data_type_to_field_name = {"values": "values"}
+
+    def _parse_file(self, file_obj, sample_id, data_type):
+        raise NotImplementedError("Downloaded files are mocked in tests.")
+
+
+class TestBaseTablesDownloadData(unittest.TestCase):
+    def setUp(self):
+        self.cache_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.cache_dir)
+
+    @patch("resdk.tables.base.EXP_ASYNC_CHUNK_SIZE", 2)
+    @patch.object(WideTables, "_download_session")
+    @patch.object(WideTables, "_get_data_urls")
+    @patch.object(WideTables, "_data", new_callable=PropertyMock)
+    def test_download_data_merges_chunks_into_wide_table(
+        self, data_mock, urls_mock, download_session_mock
+    ):
+        parsed = {
+            3: pd.Series({"g1": 1.0, "g2": 2.0}, name=3),
+            1: pd.Series({"g2": 3.0, "g3": 4.0}, name=1),
+            2: pd.Series({"g1": 5.0}, name=2),
+        }
+        data = []
+        for sample_id in parsed:
+            datum = MagicMock()
+            datum.id = sample_id + 1000
+            datum.sample.id = sample_id
+            datum.files.return_value = ["values.tsv"]
+            data.append(datum)
+        data_mock.return_value = data
+        urls_mock.side_effect = lambda uris: {uri: f"url/{uri}" for uri in uris}
+
+        async def download_file(self, url, session, sample_id, data_type):
+            return parsed[sample_id]
+
+        tables = WideTables(MagicMock(), cache_dir=self.cache_dir)
+        with patch.object(WideTables, "_download_file", download_file):
+            df = asyncio.run(tables._download_data("values"))
+
+        # Samples 3 and 1 are in the first chunk, sample 2 in the second.
+        self.assertEqual(urls_mock.call_count, 2)
+        expected = pd.DataFrame(
+            {
+                "g1": [np.nan, 5.0, 1.0],
+                "g2": [3.0, np.nan, 2.0],
+                "g3": [4.0, np.nan, np.nan],
+            },
+            index=pd.Index([1, 2, 3], name="sample_id"),
+        )
+        assert_frame_equal(df, expected)
 
 
 class TestMateFileGroups(unittest.TestCase):

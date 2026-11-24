@@ -669,18 +669,15 @@ class QCTables(BaseTables):
     ) -> pd.DataFrame:
         """Build the table for ``data_type`` from already downloaded files.
 
-        Mirrors the assembly done at the end of
-        ``BaseTables._download_data``, but parses the cached file content
-        instead of fetching it.
+        Same as ``BaseTables._download_data``, but parses the cached file
+        content instead of fetching it.
         """
         parsed = []
         for sample_id, content in raw_reports.items():
             with BytesIO(content) as f:
                 parsed.append(self._parse_file(f, sample_id, data_type))
 
-        df = pd.concat(parsed, axis=1).T.sort_index().sort_index(axis=1)
-        df.index.name = "sample_id"
-        return df
+        return self._merge_parsed(parsed)
 
     def _parse_file(self, file_obj, sample_id, data_type):
         """Parse file object and return one DataFrame line."""

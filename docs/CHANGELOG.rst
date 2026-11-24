@@ -42,6 +42,8 @@ Added
 - Add the ``custom_asset_name`` argument to the ``download`` method of ``Data``
   objects, which saves the downloaded file or directory under the given name.
   It can only be used when a single asset is downloaded
+- Add ``FusionTables`` class to the ``tables`` module, which returns gene
+  fusions detected by Arriba (``data:genefusions:arriba``) as a long table
 
 Fixed
 -----
