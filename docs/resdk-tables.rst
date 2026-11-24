@@ -5,12 +5,13 @@ ReSDK Tables
 ============
 
 ReSDK tables are helper classes for aggregating collection data in
-tabular format. Currently, we have five flavours:
+tabular format. Currently, we have six flavours:
 
     - :ref:`rna-tables`
     - :ref:`methylation-tables`
     - :ref:`microarray-tables`
     - :ref:`variant-tables`
+    - :ref:`fusion-tables`
     - :ref:`qc-tables`
 
 
@@ -212,6 +213,42 @@ mutations to only those in the given geneset. An example::
     # This would limit the variants to just the ones in BRCA2 gene.
     vt = resdk.tables.VariantTables(<collection>, geneset=["BRCA2"])
     vt.variants
+
+.. _fusion-tables:
+
+FusionTables
+============
+
+``FusionTables`` gives access to gene fusions detected by Arriba, present
+in Data of type ``data:genefusions:arriba``::
+
+    ft = resdk.tables.FusionTables(<collection-with-fusion-data>)
+    ft.fusions
+
+Unlike the tables above, fusions are returned as a long table with one row
+per fusion. The first column is ``sample_id``, followed by the columns of the
+Arriba ``fusions.tsv`` file (``gene1``, ``gene2``, ``breakpoint1``,
+``breakpoint2``, ``type``, ``confidence``, ...). A few of these columns:
+
+=========  =====  =====  =============  ==========  ===
+sample_id  gene1  gene2  type           confidence  ...
+=========  =====  =====  =============  ==========  ===
+101        CCDC6  RET    inversion      high        ...
+101        EML4   ALK    inversion      medium      ...
+103        BCR    ABL1   translocation  high        ...
+=========  =====  =====  =============  ==========  ===
+
+Values that Arriba reports as ``.`` (missing or not applicable) are given as
+NaN. Samples without detected fusions have no rows in ``ft.fusions``, but are
+still listed in ``ft.meta``. To add metadata to each fusion, merge the two
+tables::
+
+    ft.fusions.merge(ft.meta, left_on="sample_id", right_index=True)
+
+For a description of the columns, see the `Arriba output files`_
+documentation.
+
+.. _`Arriba output files`: https://github.com/suhrig/arriba/blob/master/documentation/05-Output-files.md
 
 .. _qc-tables:
 

@@ -9,6 +9,12 @@ Helper classes for aggregating collection data in tabular format.
 Table classes
 =============
 
+.. autoclass:: resdk.tables.fusion.FusionTables
+   :members:
+   :inherited-members:
+
+   .. automethod:: __init__
+
 .. autoclass:: resdk.tables.microarray.MATables
    :members:
    :inherited-members:
@@ -41,6 +47,7 @@ Table classes
 
 """
 
+from .fusion import FusionTables  # noqa
 from .methylation import MethylationTables  # noqa
 from .microarray import MATables  # noqa
 from .ml_ready import MLTables  # noqa
@@ -49,6 +56,7 @@ from .rna import RNATables  # noqa
 from .variant import VariantTables  # noqa
 
 __all__ = (
+    "FusionTables",
     "MATables",
     "MLTables",
     "MethylationTables",

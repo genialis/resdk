@@ -516,8 +516,24 @@ class BaseTables(abc.ABC):
 
     @abc.abstractmethod
     def _parse_file(self, file_obj, sample_id, data_type):
-        """Parse file object and return a one DataFrame line."""
+        """Parse file object of a single sample.
+
+        By default, return a ``pd.Series`` named by the sample id, which
+        becomes one row of the table. The returned objects of all samples
+        are combined by :meth:`_merge_parsed`.
+        """
         pass
+
+    def _merge_parsed(self, parsed: list) -> pd.DataFrame:
+        """Merge per-sample parsed objects into a table with samples in rows.
+
+        :param parsed: list of ``pd.Series`` returned by ``_parse_file``,
+                       each named by its sample id
+        :return: table with samples in rows and features in columns
+        """
+        df = pd.concat(parsed, axis=1).T.sort_index().sort_index(axis=1)
+        df.index.name = "sample_id"
+        return df
 
     def _request_auth(self, url):
         """Return (headers, cookies) to send with a download request.
@@ -604,9 +620,9 @@ class BaseTables(abc.ABC):
         EXP_ASYNC_CHUNK_SIZE.
 
         :param data_type: data type
-        :return: table with data, features in columns, samples in rows
+        :return: table assembled by :meth:`_merge_parsed`
         """
-        df = None
+        parsed = []
         for i in self.tqdm(
             range(0, len(self._data), EXP_ASYNC_CHUNK_SIZE),
             desc="Downloading data",
@@ -631,10 +647,6 @@ class BaseTables(abc.ABC):
                     self._download_file(url, session, id_, data_type)
                     for url, id_ in urls_ids
                 ]
-                data = await asyncio.gather(*futures)
-                data = pd.concat(data, axis=1)
-            df = pd.concat([df, data], axis=1)
+                parsed.extend(await asyncio.gather(*futures))
 
-        df = df.T.sort_index().sort_index(axis=1)
-        df.index.name = "sample_id"
-        return df
+        return self._merge_parsed(parsed)
