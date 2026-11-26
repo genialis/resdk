@@ -421,12 +421,10 @@ class Resolwe:
     def _login_with_password(self, username: str, password: str):
         """Sign in with a username and password, through Auth0 if possible.
 
-        The password goes to Auth0 only when this server is the one the
-        selected tenant serves (``RESDK_AUTH0_TENANT``): app.genialis.com for
-        ``production``, qa.genialis.io for ``test``. Auth0 then checks it and
-        issues tokens, which are renewed in memory. Any other server, such as a
-        local or customer one, gets the password directly, so failed attempts
-        never count against Auth0's brute-force protection.
+        The password goes to Auth0 only when the server names its Auth0 tenant
+        (:meth:`resdk.auth.Auth0Settings.discover`). Auth0 then checks it and
+        issues tokens, which are renewed in memory. A server that names no
+        tenant gets the password directly.
 
         If Auth0 refuses, or the server does not accept its token (because
         bearer authentication is not enabled there yet), the old password login
@@ -435,11 +433,11 @@ class Resolwe:
         get the password.
         """
         try:
-            settings = auth.Auth0Settings.from_env()
-        except ValueError as error:
+            settings = auth.Auth0Settings.discover(self.url)
+        except (ValueError, RuntimeError) as error:
             self.logger.info("Not signing in through Auth0: %s", error)
             settings = None
-        if settings is not None and settings.serves(self.url):
+        if settings is not None:
             try:
                 session = auth.sign_in(settings, username=username, password=password)
             except (RuntimeError, RequestException) as error:
@@ -474,11 +472,13 @@ class Resolwe:
         approve on any device. The tokens are kept in memory only and the
         access token is renewed before it expires.
 
-        :param settings: Auth0 settings; read from ``RESDK_AUTH0_TENANT`` when
-            omitted.
+        :param settings: Auth0 settings; discovered from the server when
+            omitted (:meth:`resdk.auth.Auth0Settings.discover`).
         :param device: ``True`` for the device flow, ``False`` for the browser;
             chosen automatically by default.
         """
+        if settings is None and auth.token_from_env() is None:
+            settings = auth.Auth0Settings.discover(self.url)
         accepted = self._login(token=auth.sign_in(settings, device=device))
         # Another user on the same machine can see the sign-in URL and complete
         # it with their own account, so show which account was signed in.

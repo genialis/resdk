@@ -68,23 +68,23 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
   7 days. Nothing is written to disk, so every new Python process signs in
   again.
 
+  ReSDK learns the Auth0 tenant from the server: the server names it in its
+  protected resource metadata (``/.well-known/oauth-protected-resource``),
+  and ReSDK reads the tenant's endpoints from its OpenID configuration.
+
   Scripts and CI jobs can keep using ``RESOLWE_API_USERNAME`` and
-  ``RESOLWE_API_PASSWORD``. On the server of the selected tenant
-  (app.genialis.com for ``production``, qa.genialis.io for ``test``), ReSDK
-  sends them to Auth0 and renews the tokens it gets back. This works for
-  accounts with an Auth0 password and without MFA. On any other server, and on
-  a server that does not accept Auth0 tokens yet, ReSDK uses the server's own
-  password login. If the server cannot be reached, ReSDK keeps the Auth0 token
-  and does not send the password to the server.
+  ``RESOLWE_API_PASSWORD``. On a server that names its tenant, ReSDK sends
+  them to Auth0 and renews the tokens it gets back. This works for accounts
+  with an Auth0 password and without MFA. On any other server, and on a server
+  that does not accept Auth0 tokens yet, ReSDK uses the server's own password
+  login. If the server cannot be reached, ReSDK keeps the Auth0 token and does
+  not send the password to the server.
 
   A token you already have can be passed as ``resdk.Resolwe(url=...,
   token=...)``, set with ``res.login_with_token(token)``, or put in the
   ``RESDK_TOKEN`` environment variable, which is used unless both
   ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` are set. Such a token
   is not renewed: when it expires, set a new one.
-
-  ``RESDK_AUTH0_TENANT`` selects the Auth0 tenant: ``production`` (the
-  default, for app.genialis.com) or ``test`` (for qa.genialis.io).
 
   ``login_with_auth0()`` prints the account it signed in with; check that it
   is yours. The account is the email in the token, so it is known even when
@@ -93,7 +93,8 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
   set ``RESDK_TOKEN`` there instead.
 
   Other packages, such as gpm, get a renewed token without connecting to
-  Resolwe with ``resdk.auth.sign_in()``.
+  Resolwe with
+  ``resdk.auth.sign_in(resdk.auth.Auth0Settings.discover(server_url))``.
 
 .. note::
 

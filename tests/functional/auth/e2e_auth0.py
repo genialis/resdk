@@ -7,15 +7,10 @@ without the ``expressions:api`` scope. The other functional tests sign in with
 bearer tokens, which checks that the server accepts a valid token for the
 right user.
 
-The tests need a deploy with bearer authentication enabled and the Auth0
-tenant it trusts, given explicitly rather than through ``resdk.auth.TENANTS``,
-so they also run against a deploy whose tenant ReSDK does not ship, such as
-the local deploy in CI::
+The tests need a deploy with bearer authentication enabled that serves its
+Auth0 discovery metadata (:meth:`resdk.auth.Auth0Settings.discover`)::
 
     SERVER_URL=https://<deploy host> \\
-    RESDK_E2E_AUTH0_DOMAIN=<tenant>.auth0.com \\
-    RESDK_E2E_AUTH0_CLIENT_ID=<Native application client ID> \\
-    RESDK_E2E_AUTH0_AUDIENCE=<API identifier> \\
     USER_EMAIL=... USER_PASSWORD=... \\
     pytest tests/functional/auth/e2e_auth0.py
 
@@ -23,28 +18,24 @@ The user is the regular user of the other functional tests, whose server
 login also checks the password at the tenant. It must have an Auth0 password,
 no MFA, and the ``expressions:api`` scope. ``USER_EMAIL`` and
 ``USER_PASSWORD`` must be set explicitly, so the defaults of the other
-functional tests never reach Auth0. The tests are skipped when the tenant or
-the credentials are not set, or when ``SERVER_URL`` is not HTTPS. The other
-functional tests fail in those cases, so CI does not pass without them.
+functional tests never reach Auth0. The tests are skipped when the
+credentials are not set or ``SERVER_URL`` is not HTTPS, and fail when the
+server does not serve its discovery metadata. The other functional tests fail
+in all those cases, so CI does not pass without them.
 """
 
 import dataclasses
 import functools
 import os
 import unittest
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 from resdk import auth
 from resdk.resolwe import CURRENT_USER_POSTFIX
 
-from ..base import (
-    URL,
-    USER_EMAIL,
-    USER_PASSWORD,
-    auth0_settings_for_url,
-)
+from ..base import URL, USER_EMAIL, USER_PASSWORD
 
 #: The scope the server requires in every access token.
 REQUIRED_SCOPE = "expressions:api"
@@ -55,12 +46,15 @@ REQUIRED_SCOPE = "expressions:api"
 CREDENTIALS_SET = bool(os.environ.get("USER_EMAIL") and os.environ.get("USER_PASSWORD"))
 
 
-SETTINGS = auth0_settings_for_url()
+@functools.cache
+def _settings():
+    """Return the Auth0 settings the server names, discovering them once."""
+    return auth.Auth0Settings.discover(URL)
 
 
 def _token_response(scope):
     """Sign in with the password grant for ``scope``; return Auth0's response."""
-    settings = dataclasses.replace(SETTINGS, scope=scope)
+    settings = dataclasses.replace(_settings(), scope=scope)
     return auth._password_sign_in(settings, USER_EMAIL, USER_PASSWORD)
 
 
@@ -91,11 +85,10 @@ def _emails(response):
 
 class TestAuth0Bearer(unittest.TestCase):
     def setUp(self):
-        if SETTINGS is None:
+        if urlparse(URL).scheme != "https":
             self.skipTest(
-                f"No Auth0 tenant for {URL}; set RESDK_E2E_AUTH0_DOMAIN, "
-                "RESDK_E2E_AUTH0_CLIENT_ID and RESDK_E2E_AUTH0_AUDIENCE, and an "
-                "HTTPS SERVER_URL of a deploy with bearer authentication.",
+                f"Set an HTTPS SERVER_URL of a deploy with bearer authentication, "
+                f"not {URL}."
             )
         if not CREDENTIALS_SET:
             self.skipTest("Set USER_EMAIL and USER_PASSWORD.")

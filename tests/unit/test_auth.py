@@ -110,53 +110,194 @@ class TestTokenFromEnv(unittest.TestCase):
             self.assertIsNone(auth.token_from_env())
 
 
-class TestAuth0Settings(unittest.TestCase):
-    def test_test_tenant_is_selected_by_name(self):
-        with patch.dict("os.environ", {"RESDK_AUTH0_TENANT": " test "}, clear=True):
-            settings = auth.Auth0Settings.from_env()
-        self.assertEqual(settings.domain, "genialis-test.eu.auth0.com")
-        self.assertEqual(settings.client_id, auth.TENANTS["test"]["client_id"])
-        self.assertEqual(settings.audience, "https://api.genialis.io")
+ISSUER = "https://example.auth0.com/"
+SETTINGS = auth.Auth0Settings(
+    issuer=ISSUER,
+    client_id="cid",
+    audience="https://api.example",
+    token_endpoint="https://example.auth0.com/oauth/token",
+    authorization_endpoint="https://example.auth0.com/authorize",
+    device_authorization_endpoint="https://example.auth0.com/oauth/device/code",
+)
 
-    def test_production_is_the_default(self):
-        tenants = {
-            **auth.TENANTS,
-            "production": {
-                "domain": "p.example",
-                "client_id": "p",
-                "audience": "https://api.p.example",
-                "servers": (),
-            },
+
+def _document(body, status=200):
+    """Return a response with the JSON ``body``; ``ValueError`` if ``body`` is one."""
+    response = MagicMock(status_code=status)
+    if isinstance(body, Exception):
+        response.json.side_effect = body
+    else:
+        response.json.return_value = body
+    return response
+
+
+class TestDiscover(unittest.TestCase):
+    SERVER = "https://app.example"
+    METADATA = {
+        "resource": "https://app.example",
+        "authorization_servers": [ISSUER],
+        "client_id": "cid",
+        "audience": "https://api.example",
+        "scopes_supported": ["expressions:api"],
+    }
+    CONFIGURATION = {
+        "issuer": ISSUER,
+        "token_endpoint": "https://example.auth0.com/oauth/token",
+        "authorization_endpoint": "https://example.auth0.com/authorize",
+        "device_authorization_endpoint": "https://example.auth0.com/oauth/device/code",
+        "jwks_uri": "https://example.auth0.com/.well-known/jwks.json",
+    }
+
+    def _discover(self, metadata=None, configuration=None, server=SERVER):
+        documents = {
+            "https://app.example/.well-known/oauth-protected-resource": metadata
+            or self.METADATA,
+            "https://example.auth0.com/.well-known/openid-configuration": configuration
+            or self.CONFIGURATION,
         }
-        with patch.object(auth, "TENANTS", tenants):
-            for env in ({}, {"RESDK_AUTH0_TENANT": ""}):
-                with patch.dict("os.environ", env, clear=True):
-                    settings = auth.Auth0Settings.from_env()
-                self.assertEqual(
-                    (settings.domain, settings.client_id), ("p.example", "p")
-                )
 
-    def test_unknown_tenant_is_rejected(self):
-        with patch.dict("os.environ", {"RESDK_AUTH0_TENANT": "staging"}, clear=True):
-            with self.assertRaisesRegex(ValueError, "must be one of production, test"):
-                auth.Auth0Settings.from_env()
+        def get(url, **kwargs):
+            self.assertEqual(kwargs.get("allow_redirects"), False)
+            self.assertIn("timeout", kwargs)
+            document = documents.get(url)
+            return _document({}, status=404) if document is None else document
 
-    def test_tenant_without_an_application_is_explained(self):
-        tenants = {
-            **auth.TENANTS,
-            "production": {"domain": "p.example", "client_id": None, "servers": ()},
-        }
-        with patch.object(auth, "TENANTS", tenants):
-            with patch.dict("os.environ", {}, clear=True):
-                with self.assertRaises(ValueError) as raised:
-                    auth.Auth0Settings.from_env()
-        self.assertIn("not available yet", str(raised.exception))
-        self.assertIn("RESDK_TOKEN", str(raised.exception))
-        self.assertNotIn("RESDK_AUTH0_TENANT=test", str(raised.exception))
+        with patch.object(auth.requests, "get", side_effect=get) as get_mock:
+            for url, document in documents.items():
+                if not isinstance(document, MagicMock):
+                    documents[url] = _document(document)
+            return auth.Auth0Settings.discover(server), get_mock
+
+    def test_settings_come_from_the_server_and_its_issuer(self):
+        settings, get = self._discover()
+        self.assertEqual(settings, SETTINGS)
+        self.assertEqual(
+            [call.args[0] for call in get.call_args_list],
+            [
+                "https://app.example/.well-known/oauth-protected-resource",
+                "https://example.auth0.com/.well-known/openid-configuration",
+            ],
+        )
+
+    def test_server_path_and_default_port_are_ignored(self):
+        for server in ("https://app.example/", "https://app.example:443/api/"):
+            with self.subTest(server=server):
+                settings, _ = self._discover(server=server)
+                self.assertEqual(settings, SETTINGS)
+
+    def test_server_on_another_port_names_it_in_the_resource(self):
+        metadata = {**self.METADATA, "resource": "https://app.example:8443"}
+
+        def get(url, **kwargs):
+            if url == "https://app.example:8443/.well-known/oauth-protected-resource":
+                return _document(metadata)
+            return _document(self.CONFIGURATION)
+
+        with patch.object(auth.requests, "get", side_effect=get):
+            settings = auth.Auth0Settings.discover("https://app.example:8443")
+        self.assertEqual(settings, SETTINGS)
+
+    def test_server_must_use_https(self):
+        for server in ("http://app.example", "app.example", "https://"):
+            with self.subTest(server=server):
+                with patch.object(auth.requests, "get") as get:
+                    with self.assertRaisesRegex(ValueError, "HTTPS"):
+                        auth.Auth0Settings.discover(server)
+                get.assert_not_called()
+
+    def test_metadata_for_another_resource_is_rejected(self):
+        for resource in (None, "https://other.example", "https://app.example/"):
+            with self.subTest(resource=resource):
+                metadata = {**self.METADATA, "resource": resource}
+                with self.assertRaisesRegex(RuntimeError, "is for"):
+                    self._discover(metadata=metadata)
+
+    def test_exactly_one_https_issuer_is_required(self):
+        for issuers in (
+            None,
+            [],
+            ISSUER,
+            [ISSUER, "https://other.auth0.com/"],
+            ["http://example.auth0.com/"],
+            [""],
+            [None],
+        ):
+            with self.subTest(issuers=issuers):
+                metadata = {**self.METADATA, "authorization_servers": issuers}
+                with self.assertRaisesRegex(RuntimeError, "exactly one HTTPS"):
+                    self._discover(metadata=metadata)
+
+    def test_client_and_audience_are_required(self):
+        for field in ("client_id", "audience"):
+            for value in (None, "", 7):
+                with self.subTest(field=field, value=value):
+                    metadata = {**self.METADATA, field: value}
+                    with self.assertRaisesRegex(RuntimeError, f"has no {field}"):
+                        self._discover(metadata=metadata)
+
+    def test_issuer_must_match_its_configuration(self):
+        for issuer in ("https://example.auth0.com", "https://other.auth0.com/", None):
+            with self.subTest(issuer=issuer):
+                configuration = {**self.CONFIGURATION, "issuer": issuer}
+                with self.assertRaisesRegex(RuntimeError, "names the issuer"):
+                    self._discover(configuration=configuration)
+
+    def test_endpoints_must_be_on_the_issuers_origin(self):
+        for field in (
+            "token_endpoint",
+            "authorization_endpoint",
+            "device_authorization_endpoint",
+        ):
+            for endpoint in (
+                None,
+                "https://attacker.example/oauth/token",
+                "http://example.auth0.com/oauth/token",
+                "https://example.auth0.com:8443/oauth/token",
+                "https://example.auth0.com:bad/oauth/token",
+            ):
+                with self.subTest(field=field, endpoint=endpoint):
+                    configuration = {**self.CONFIGURATION, field: endpoint}
+                    with self.assertRaisesRegex(RuntimeError, "on its origin"):
+                        self._discover(configuration=configuration)
+
+    def test_unreadable_documents_are_reported(self):
+        cases = (
+            (_document({}, status=404), "HTTP 404"),
+            (_document({}, status=302), "HTTP 302"),
+            (_document(ValueError("not JSON")), "not JSON"),
+            (_document(["not", "an", "object"]), "not a JSON object"),
+        )
+        for response, message in cases:
+            with self.subTest(message=message):
+                with patch.object(auth.requests, "get", return_value=response):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        auth.Auth0Settings.discover(self.SERVER)
+
+    def test_server_without_metadata_is_pointed_to_the_token(self):
+        # A web front end may answer the missing path with its index page.
+        for response in (_document(ValueError("not JSON")), _document({}, status=404)):
+            with self.subTest(status=response.status_code):
+                with patch.object(auth.requests, "get", return_value=response):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "protected resource metadata.*RESDK_TOKEN"
+                    ):
+                        auth.Auth0Settings.discover(self.SERVER)
+
+    def test_issuer_without_configuration_is_not_blamed_on_the_server(self):
+        with self.assertRaises(RuntimeError) as raised:
+            self._discover(configuration=_document(ValueError("not JSON")))
+        self.assertIn("OpenID configuration", str(raised.exception))
+        self.assertNotIn(auth.TOKEN_ENV_VAR, str(raised.exception))
+
+    def test_unreachable_server_is_reported(self):
+        with patch.object(
+            auth.requests, "get", side_effect=requests.ConnectionError("refused")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Cannot read the protected"):
+                auth.Auth0Settings.discover(self.SERVER)
 
     def test_all_scopes_and_offline_access_are_requested(self):
-        settings = auth.Auth0Settings.for_tenant("test")
-        scopes = settings.scope.split()
+        scopes = SETTINGS.scope.split()
         for scope in (
             "openid",
             "email",
@@ -165,21 +306,6 @@ class TestAuth0Settings(unittest.TestCase):
             "supermodel:score",
         ):
             self.assertIn(scope, scopes)
-
-    def test_old_variables_are_ignored(self):
-        env = {
-            "RESDK_AUTH0_TENANT": "test",
-            "RESDK_AUTH0_CLIENT_ID": "cid",
-            "RESDK_AUTH0_DOMAIN": "example.auth0.com",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            settings = auth.Auth0Settings.from_env()
-        self.assertEqual(settings.domain, "genialis-test.eu.auth0.com")
-
-
-SETTINGS = auth.Auth0Settings(
-    domain="example.auth0.com", client_id="cid", audience="https://api.example"
-)
 
 
 def _token_response(status=200, **body):
@@ -223,6 +349,17 @@ class TestSignIn(unittest.TestCase):
             session = auth.sign_in()
         self.assertFalse(session.can_refresh)
         self.assertEqual(session.access_token, "env-token")
+
+    def test_signing_in_without_settings_is_explained(self):
+        for kwargs in ({}, {"username": "u", "password": "p"}):
+            with self.subTest(kwargs=kwargs):
+                with (
+                    patch.dict("os.environ", {}, clear=True),
+                    patch.object(auth.requests, "post") as post,
+                ):
+                    with self.assertRaisesRegex(ValueError, "Auth0Settings.discover"):
+                        auth.sign_in(**kwargs)
+                post.assert_not_called()
 
 
 class TestTokenEmail(unittest.TestCase):
@@ -368,14 +505,48 @@ class TestPasswordSignIn(unittest.TestCase):
         self.assertEqual(session.access_token, "a1")
 
 
-class TestLoginWithPassword(unittest.TestCase):
-    PAIRED = auth.Auth0Settings(
-        domain="example.auth0.com",
-        client_id="cid",
-        audience="https://api.example",
-        servers=("app.example",),
-    )
+class TestNoRedirectsFromAuth0(unittest.TestCase):
+    """Requests that carry credentials never follow a redirect off Auth0."""
 
+    REDIRECT = _token_response(307)
+
+    def test_password_is_not_resent_to_a_redirect(self):
+        with patch.object(auth.requests, "post", return_value=self.REDIRECT) as post:
+            with self.assertRaisesRegex(RuntimeError, "redirect") as raised:
+                auth.sign_in(SETTINGS, username="u@example.com", password="secret-pw")
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
+        self.assertNotIn("secret-pw", str(raised.exception))
+
+    def test_device_sign_in_stops_at_a_redirect(self):
+        with patch.object(auth.requests, "post", return_value=self.REDIRECT) as post:
+            with self.assertRaisesRegex(RuntimeError, "redirect"):
+                auth._device_sign_in(SETTINGS)
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
+
+    def test_device_polling_stops_at_a_redirect(self):
+        code = _token_response(**TestDeviceSignIn.CODE)
+        with (
+            patch.object(
+                auth.requests, "post", side_effect=[code, self.REDIRECT]
+            ) as post,
+            patch.object(auth.time, "sleep"),
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "redirect"):
+                auth._device_sign_in(SETTINGS)
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
+
+    def test_refresh_token_is_not_resent_to_a_redirect(self):
+        session = auth.Auth0Session.from_token_response(
+            {"access_token": "a1", "refresh_token": "r1", "expires_in": 0}, SETTINGS
+        )
+        with patch.object(auth.requests, "post", return_value=self.REDIRECT) as post:
+            with self.assertRaisesRegex(RuntimeError, "redirect"):
+                session.access_token
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
+
+
+class TestLoginWithPassword(unittest.TestCase):
     def _resolwe(self, accepted, url="https://app.example"):
         resolwe = MagicMock(url=url)
         resolwe.auth.username = None
@@ -389,46 +560,41 @@ class TestLoginWithPassword(unittest.TestCase):
         resolwe._login.side_effect = login
         return resolwe
 
-    def _login(self, resolwe, sign_in=None, settings=PAIRED):
+    def _login(self, resolwe, sign_in=None):
         sign_in = sign_in or MagicMock(return_value="session")
         with (
-            patch.object(auth.Auth0Settings, "from_env", return_value=settings),
+            patch.object(auth.Auth0Settings, "discover", return_value=SETTINGS),
             patch.object(auth, "sign_in", sign_in),
         ):
             Resolwe._login_with_password(resolwe, "u@example.com", "pw")
         return sign_in
 
-    def test_uses_auth0_on_the_tenants_server(self):
+    def test_uses_the_tenant_the_server_names(self):
         resolwe = self._resolwe(accepted=True)
-        sign_in = self._login(resolwe)
+        with (
+            patch.object(
+                auth.Auth0Settings, "discover", return_value=SETTINGS
+            ) as discover,
+            patch.object(auth, "sign_in", return_value="session") as sign_in,
+        ):
+            Resolwe._login_with_password(resolwe, "u@example.com", "pw")
+        discover.assert_called_once_with("https://app.example")
         sign_in.assert_called_once_with(
-            self.PAIRED, username="u@example.com", password="pw"
+            SETTINGS, username="u@example.com", password="pw"
         )
         resolwe._login.assert_called_once_with(token="session")
 
-    def test_other_servers_never_send_the_password_to_auth0(self):
-        for url in (
-            "https://customer.example",
-            "http://localhost:8000",
-            "http://app.example",
-            "https://app.example:8443",
-        ):
-            resolwe = self._resolwe(accepted=True, url=url)
-            sign_in = self._login(resolwe)
-            sign_in.assert_not_called()
-            resolwe._login.assert_called_once_with(
-                username="u@example.com", password="pw"
-            )
-
-    def test_tenant_without_an_application_uses_the_server_login(self):
-        resolwe = self._resolwe(accepted=True)
-        with patch.object(
-            auth.Auth0Settings, "from_env", side_effect=ValueError("not available")
-        ):
-            with patch.object(auth, "sign_in") as sign_in:
-                Resolwe._login_with_password(resolwe, "u@example.com", "pw")
-        sign_in.assert_not_called()
-        resolwe._login.assert_called_once_with(username="u@example.com", password="pw")
+    def test_server_without_a_tenant_never_sends_the_password_to_auth0(self):
+        for error in (ValueError("not HTTPS"), RuntimeError("HTTP 404")):
+            with self.subTest(error=error):
+                resolwe = self._resolwe(accepted=True)
+                with patch.object(auth.Auth0Settings, "discover", side_effect=error):
+                    with patch.object(auth, "sign_in") as sign_in:
+                        Resolwe._login_with_password(resolwe, "u@example.com", "pw")
+                sign_in.assert_not_called()
+                resolwe._login.assert_called_once_with(
+                    username="u@example.com", password="pw"
+                )
 
     def test_falls_back_when_the_server_rejects_the_token(self):
         resolwe = self._resolwe(accepted=False)
@@ -562,18 +728,11 @@ class TestTokenLogin(unittest.TestCase):
 class TestPasswordLoginAgainstTheServer(unittest.TestCase):
     """The choice between the Auth0 token and the server's password login."""
 
-    SETTINGS = auth.Auth0Settings(
-        domain="example.auth0.com",
-        client_id="cid",
-        audience="https://api.example",
-        servers=("app.example",),
-    )
-
     def _login(self, answer, token=TOKEN):
         resolwe = _connection(answer)
         session = auth.Auth0Session(token)
         with (
-            patch.object(auth.Auth0Settings, "from_env", return_value=self.SETTINGS),
+            patch.object(auth.Auth0Settings, "discover", return_value=SETTINGS),
             patch.object(auth, "sign_in", return_value=session),
             patch("resdk.resolwe.ResolweAPI"),
             patch.object(
@@ -609,20 +768,6 @@ class TestPasswordLoginAgainstTheServer(unittest.TestCase):
                 resolwe, session, server_login = self._login(answer, token="a.b.c")
                 server_login.assert_not_called()
                 self.assertIs(resolwe.auth.tokens, session)
-
-
-class TestTenantServers(unittest.TestCase):
-    def test_each_tenant_serves_its_own_server(self):
-        production = {**auth.TENANTS["production"], "client_id": "p"}
-        with patch.dict(auth.TENANTS, {"production": production}):
-            self.assertTrue(
-                auth.Auth0Settings.for_tenant("production").serves(
-                    "https://app.genialis.com"
-                )
-            )
-        test = auth.Auth0Settings.for_tenant("test")
-        self.assertTrue(test.serves("https://qa.genialis.io/"))
-        self.assertFalse(test.serves("https://app.genialis.com"))
 
 
 class TestChoosingTheSignIn(unittest.TestCase):
@@ -886,12 +1031,41 @@ class TestLoginWithAuth0(unittest.TestCase):
         resolwe.auth.username = username
         resolwe._login.return_value = accepted
         with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(auth.Auth0Settings, "discover", return_value=SETTINGS),
             patch.object(auth, "sign_in", return_value="tok"),
             patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
             Resolwe.login_with_auth0(resolwe)
         resolwe._login.assert_called_once_with(token="tok")
         return stderr.getvalue()
+
+    def test_settings_are_discovered_from_the_server(self):
+        resolwe = MagicMock(url="https://app.example")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(
+                auth.Auth0Settings, "discover", return_value=SETTINGS
+            ) as discover,
+            patch.object(auth, "sign_in", return_value="tok") as sign_in,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            Resolwe.login_with_auth0(resolwe, device=True)
+        discover.assert_called_once_with("https://app.example")
+        sign_in.assert_called_once_with(SETTINGS, device=True)
+
+    def test_env_token_needs_no_discovery(self):
+        resolwe = MagicMock(url="https://app.example")
+        with (
+            patch.dict("os.environ", {auth.TOKEN_ENV_VAR: "env-token"}, clear=True),
+            patch.object(auth.Auth0Settings, "discover") as discover,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            Resolwe.login_with_auth0(resolwe)
+        discover.assert_not_called()
+        self.assertEqual(
+            resolwe._login.call_args.kwargs["token"].access_token, "env-token"
+        )
 
     def test_prints_signed_in_account(self):
         self.assertIn(f"Signed in to Resolwe as {EMAIL}.", self._message(True))
@@ -935,7 +1109,7 @@ class TestLogin(unittest.TestCase):
             threads.append(threading.Thread(target=redirect))
             threads[0].start()
 
-        token_response = MagicMock(ok=True)
+        token_response = MagicMock(ok=True, status_code=200)
         token_response.json.return_value = {"access_token": "tok"}
         with (
             patch.object(auth, "CALLBACK_PORT", port),
@@ -948,6 +1122,7 @@ class TestLogin(unittest.TestCase):
         self.assertEqual(body["access_token"], "tok")
         self.assertEqual(statuses, [400, 400, 200])
         self.assertEqual(post.call_args.kwargs["data"]["code"], "good")
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
 
     def test_stalled_connection_does_not_block_the_redirect(self):
         """A client that keeps a connection open does not hold up the sign-in."""
@@ -984,7 +1159,7 @@ class TestLogin(unittest.TestCase):
             for thread in threads:
                 thread.start()
 
-        token_response = MagicMock(ok=True)
+        token_response = MagicMock(ok=True, status_code=200)
         token_response.json.return_value = {"access_token": "tok"}
         try:
             with (
