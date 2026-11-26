@@ -155,15 +155,17 @@ class TestAuth0Settings(unittest.TestCase):
 
     def test_all_scopes_and_offline_access_are_requested(self):
         settings = auth.Auth0Settings.for_tenant("test")
-        scopes = settings.scope.split()
-        for scope in (
-            "openid",
-            "email",
-            "offline_access",
-            "expressions:api",
-            "supermodel:score",
-        ):
-            self.assertIn(scope, scopes)
+        self.assertEqual(
+            sorted(settings.scope.split()),
+            [
+                "email",
+                "expressions:api",
+                "offline_access",
+                "openid",
+                "profile",
+                "supermodel:score",
+            ],
+        )
 
     def test_old_variables_are_ignored(self):
         env = {

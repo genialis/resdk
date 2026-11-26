@@ -89,13 +89,10 @@ TENANTS = {
     },
 }
 
-#: ``expressions:api`` is the scope the Resolwe server requires, and the
-#: supermodel scopes let the same token score with gpm; Auth0 drops the scopes
-#: the user does not hold. ``offline_access`` asks for a refresh token.
-DEFAULT_SCOPE = (
-    "openid profile email offline_access expressions:api "
-    "supermodel:score supermodel:versions:read"
-)
+#: ``expressions:api`` is the scope the Resolwe server requires, and
+#: ``supermodel:score`` lets the same token score with gpm; Auth0 drops the
+#: scopes the user does not hold. ``offline_access`` asks for a refresh token.
+DEFAULT_SCOPE = "openid profile email offline_access expressions:api supermodel:score"
 #: Claim of the access token that holds the user's email. The Resolwe server
 #: identifies the user by it.
 EMAIL_CLAIM = "https://genialis.com/email"
