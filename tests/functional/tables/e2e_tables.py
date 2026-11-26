@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import time
+import unittest
 
 import numpy as np
 
@@ -13,8 +14,12 @@ from ..base import BaseResdkFunctionalTest
 TABLES_LIVE_URL = "https://app.genialis.com"
 TABLES_USER_EMAIL = "jure+e2e@genialis.com"
 TABLES_USER_PASSWORD = "safe4ever&ever"
+#: ReSDK signs in with a password only through the Auth0 tenant a server
+#: names in its discovery metadata, which app.genialis.com does not serve yet.
+SKIP_REASON = "app.genialis.com does not serve its Auth0 discovery metadata yet."
 
 
+@unittest.skip(SKIP_REASON)
 class TestTables(BaseResdkFunctionalTest):
     def setUp(self):
         self.cache_dir = tempfile.mkdtemp()
@@ -90,6 +95,7 @@ class TestTables(BaseResdkFunctionalTest):
         self.assertTrue(t3 < t2)
 
 
+@unittest.skip(SKIP_REASON)
 class TestVariantTables(BaseResdkFunctionalTest):
     def setUp(self):
         self.cache_dir = tempfile.mkdtemp()
@@ -128,6 +134,7 @@ class TestVariantTables(BaseResdkFunctionalTest):
         self.assertEqual(self.vt.filter.loc[112166, "14_52004545_C>CT"], "PASS")
 
 
+@unittest.skip(SKIP_REASON)
 class TestQCTables(BaseResdkFunctionalTest):
     def setUp(self):
         self.cache_dir = tempfile.mkdtemp()

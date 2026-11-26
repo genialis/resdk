@@ -44,26 +44,22 @@ class TestResAuthBearer(unittest.TestCase):
         res_auth = ResAuth(url="http://localhost:8000", token="a.b.c")
         request = res_auth(_Request())
         self.assertEqual(request.headers["Authorization"], "Bearer a.b.c")
-        # No CSRF header or cookies are used with bearer auth.
-        self.assertNotIn("X-CSRFToken", request.headers)
-        self.assertEqual(res_auth.cookies, {})
-
-    def test_token_wins_over_username_and_password(self):
-        with patch.object(ResAuth, "automatic_login") as automatic_login:
-            res_auth = ResAuth("user", "pass", "http://localhost:8000", token="a.b.c")
-        automatic_login.assert_not_called()
-        self.assertEqual(res_auth.cookies, {})
 
     def test_username_is_the_email_in_the_token(self):
-        with patch.object(ResAuth, "automatic_login"):
-            res_auth = ResAuth("other", "pass", "http://localhost:8000", token=TOKEN)
+        res_auth = ResAuth("http://localhost:8000", token=TOKEN)
         self.assertEqual(res_auth.username, EMAIL)
 
     def test_token_without_an_email_has_no_username(self):
-        res_auth = ResAuth("other", url="http://localhost:8000", token="a.b.c")
+        res_auth = ResAuth("http://localhost:8000", token="a.b.c")
         self.assertIsNone(res_auth.username)
 
-    def test_token_login_clears_session_cookies(self):
+    def test_token_is_keyword_only(self):
+        # An old call ResAuth(username, password) must not send the password
+        # as a bearer token.
+        with self.assertRaises(TypeError):
+            ResAuth("me@example.com", "hunter2")
+
+    def test_login_clears_cookies_of_an_earlier_connection(self):
         resolwe = MagicMock()
         resolwe.url = "http://localhost:8000"
         resolwe.session.cookies = requests.utils.cookiejar_from_dict({"sessionid": "s"})
@@ -551,11 +547,11 @@ class TestLoginWithPassword(unittest.TestCase):
         resolwe = MagicMock(url=url)
         resolwe.auth.username = None
 
-        def login(username=None, password=None, token=None):
-            # The user lookup succeeds only when the server accepts the login.
-            if token is None or accepted:
+        def login(token=None):
+            # The user lookup succeeds only when the server accepts the token.
+            if accepted:
                 resolwe.auth.username = "u@example.com"
-            return None if token is None else accepted
+            return accepted
 
         resolwe._login.side_effect = login
         return resolwe
@@ -584,32 +580,75 @@ class TestLoginWithPassword(unittest.TestCase):
         )
         resolwe._login.assert_called_once_with(token="session")
 
-    def test_server_without_a_tenant_never_sends_the_password_to_auth0(self):
+    def test_server_without_a_tenant_never_gets_the_password(self):
         for error in (ValueError("not HTTPS"), RuntimeError("HTTP 404")):
             with self.subTest(error=error):
                 resolwe = self._resolwe(accepted=True)
                 with patch.object(auth.Auth0Settings, "discover", side_effect=error):
                     with patch.object(auth, "sign_in") as sign_in:
-                        Resolwe._login_with_password(resolwe, "u@example.com", "pw")
+                        with self.assertRaises(type(error)):
+                            Resolwe._login_with_password(resolwe, "u@example.com", "pw")
                 sign_in.assert_not_called()
-                resolwe._login.assert_called_once_with(
-                    username="u@example.com", password="pw"
-                )
+                resolwe._login.assert_not_called()
 
-    def test_falls_back_when_the_server_rejects_the_token(self):
+    def test_token_the_server_rejects_is_an_error(self):
         resolwe = self._resolwe(accepted=False)
-        self._login(resolwe)
+        with self.assertRaisesRegex(RuntimeError, "did not accept the token"):
+            self._login(resolwe)
+        # The rejected token is not kept: the connection is anonymous.
         self.assertEqual(
-            resolwe._login.call_args_list[-1].kwargs,
-            {"username": "u@example.com", "password": "pw"},
+            [c.kwargs for c in resolwe._login.call_args_list],
+            [{"token": "session"}, {}],
         )
-        resolwe.logger.warning.assert_called_once()
 
-    def test_falls_back_when_auth0_refuses(self):
+    def test_empty_username_or_password_is_an_error(self):
+        for username, password in (("u@example.com", ""), ("", "pw")):
+            with self.subTest(username=username, password=password):
+                resolwe = self._resolwe(accepted=True)
+                with (
+                    patch.dict("os.environ", {auth.TOKEN_ENV_VAR: "env-token"}),
+                    patch.object(auth.Auth0Settings, "discover") as discover,
+                    patch.object(auth, "sign_in") as sign_in,
+                ):
+                    with self.assertRaisesRegex(ValueError, "username and a password"):
+                        Resolwe._login_with_password(resolwe, username, password)
+                discover.assert_not_called()
+                sign_in.assert_not_called()
+                resolwe._login.assert_not_called()
+
+    def test_empty_password_at_the_prompt_is_an_error(self):
+        resolwe = MagicMock(url="https://app.example")
+        resolwe._login_with_password = lambda u, p: Resolwe._login_with_password(
+            resolwe, u, p
+        )
+        with (
+            patch("resdk.resolwe.getpass.getpass", return_value=""),
+            patch.object(auth, "sign_in") as sign_in,
+        ):
+            with self.assertRaises(ValueError):
+                Resolwe.login(resolwe, "u@example.com")
+        sign_in.assert_not_called()
+        resolwe.login_with_auth0.assert_not_called()
+
+    def test_auth0_refusal_is_an_error(self):
         resolwe = self._resolwe(accepted=True)
-        self._login(resolwe, sign_in=MagicMock(side_effect=RuntimeError("refused")))
-        resolwe._login.assert_called_once_with(username="u@example.com", password="pw")
-        resolwe.logger.warning.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "refused"):
+            self._login(resolwe, sign_in=MagicMock(side_effect=RuntimeError("refused")))
+        resolwe._login.assert_not_called()
+
+    def test_login_without_a_username_signs_in_through_auth0(self):
+        resolwe = MagicMock()
+        Resolwe.login(resolwe)
+        resolwe.login_with_auth0.assert_called_once_with()
+        resolwe._login_with_password.assert_not_called()
+
+    def test_login_with_a_username_asks_for_the_password(self):
+        resolwe = MagicMock()
+        with patch("resdk.resolwe.getpass.getpass", return_value="pw") as ask:
+            Resolwe.login(resolwe, "u@example.com")
+        ask.assert_called_once()
+        resolwe._login_with_password.assert_called_once_with("u@example.com", "pw")
+        resolwe.login_with_auth0.assert_not_called()
 
 
 def _answer(status, body=None):
@@ -711,22 +750,9 @@ class TestTokenLogin(unittest.TestCase):
                 self.assertIsNone(resolwe.accepted)
                 resolwe.logger.warning.assert_called_once()
 
-    def test_session_login_asks_the_server_for_the_account(self):
-        resolwe = _connection(_answer(200, []))
-        resolwe.user.get.return_value.email = EMAIL
-        with (
-            patch("resdk.resolwe.ResolweAPI"),
-            patch.object(ResAuth, "interactive_login", return_value={}),
-        ):
-            accepted = Resolwe._login(resolwe, interactive=True)
-        self.assertIsNone(accepted)
-        self.assertEqual(resolwe.auth.username, EMAIL)
-        resolwe.user.get.assert_called_once_with(current_only=True)
-        resolwe.session.get.assert_not_called()
-
 
 class TestPasswordLoginAgainstTheServer(unittest.TestCase):
-    """The choice between the Auth0 token and the server's password login."""
+    """What the server's answer about the Auth0 token does to a password login."""
 
     def _login(self, answer, token=TOKEN):
         resolwe = _connection(answer)
@@ -735,38 +761,31 @@ class TestPasswordLoginAgainstTheServer(unittest.TestCase):
             patch.object(auth.Auth0Settings, "discover", return_value=SETTINGS),
             patch.object(auth, "sign_in", return_value=session),
             patch("resdk.resolwe.ResolweAPI"),
-            patch.object(
-                ResAuth, "automatic_login", return_value={"sessionid": "s"}
-            ) as server_login,
         ):
             Resolwe._login_with_password(resolwe, EMAIL, "pw")
-        return resolwe, session, server_login
+        return resolwe, session
 
     def test_accepted_token_is_used(self):
-        resolwe, session, server_login = self._login(_answer(200, [{"email": EMAIL}]))
+        resolwe, session = self._login(_answer(200, [{"email": EMAIL}]))
         self.assertIs(resolwe.auth.tokens, session)
-        server_login.assert_not_called()
 
-    def test_rejected_token_falls_back_to_the_server_login(self):
+    def test_rejected_token_is_an_error(self):
         for answer in REJECTIONS:
             with self.subTest(status=answer.status_code):
-                resolwe, _, server_login = self._login(answer)
-                server_login.assert_called_once_with(EMAIL, "pw")
-                self.assertIsNone(resolwe.auth.tokens)
+                with self.assertRaisesRegex(RuntimeError, "did not accept the token"):
+                    self._login(answer)
 
-    def test_unreachable_server_never_gets_the_password(self):
+    def test_unreachable_server_keeps_the_token(self):
         for answer in NO_ANSWERS:
             with self.subTest(answer=answer):
-                resolwe, session, server_login = self._login(answer)
-                server_login.assert_not_called()
+                resolwe, session = self._login(answer)
                 self.assertIs(resolwe.auth.tokens, session)
                 self.assertEqual(resolwe.auth.username, EMAIL)
 
     def test_token_without_an_email_is_used_like_any_other(self):
         for answer in (_answer(200, [{"email": EMAIL}]), _answer(503)):
             with self.subTest(status=answer.status_code):
-                resolwe, session, server_login = self._login(answer, token="a.b.c")
-                server_login.assert_not_called()
+                resolwe, session = self._login(answer, token="a.b.c")
                 self.assertIs(resolwe.auth.tokens, session)
 
 

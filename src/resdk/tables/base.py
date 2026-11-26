@@ -535,20 +535,16 @@ class BaseTables(abc.ABC):
         df.index.name = "sample_id"
         return df
 
-    def _request_auth(self, url):
-        """Return (headers, cookies) to send with a download request.
+    def _request_headers(self, url):
+        """Return the headers to send with a download request.
 
-        Credentials go only to the Resolwe origin. Pre-signed storage URLs (for
-        example S3) carry their own signature, so they get neither the session
-        cookie nor the bearer token.
+        The bearer token goes only to the Resolwe origin. Pre-signed storage
+        URLs (for example S3) carry their own signature and get no token.
         """
         if not is_credential_origin(url, url_origin(self.resolwe.url)):
-            return {}, {}
-        auth = self.resolwe.auth
-        headers = {}
-        if getattr(auth, "token", None):
-            headers["Authorization"] = f"Bearer {auth.token}"
-        return headers, dict(auth.cookies)
+            return {}
+        token = self.resolwe.auth.token
+        return {"Authorization": f"Bearer {token}"} if token else {}
 
     @staticmethod
     def _download_session():
@@ -564,7 +560,7 @@ class BaseTables(abc.ABC):
         """Return the error for a failed download, without the request headers.
 
         aiohttp's own error includes the request headers, which hold the bearer
-        token and session cookie, and prints them in its repr.
+        token, and prints them in its repr.
         """
         request_info = aiohttp.RequestInfo(
             response.url, response.method, CIMultiDictProxy(CIMultiDict())
@@ -579,14 +575,12 @@ class BaseTables(abc.ABC):
     async def _fetch(self, session, url):
         """Download a URL and return its content.
 
-        Redirects are followed here, not by aiohttp, so that credentials are
-        sent on each hop only if it is on the Resolwe origin. Older aiohttp
-        versions re-send per-request cookies to a redirect's new host.
+        Redirects are followed here, not by aiohttp, so that the token is sent
+        on each hop only if it is on the Resolwe origin.
         """
         for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
-            headers, cookies = self._request_auth(url)
             async with session.get(
-                url, headers=headers, cookies=cookies, allow_redirects=False
+                url, headers=self._request_headers(url), allow_redirects=False
             ) as response:
                 location = response.headers.get("Location")
                 if response.status in (301, 302, 303, 307, 308) and location:
@@ -641,7 +635,7 @@ class BaseTables(abc.ABC):
             urls_ids = [(url, uri_to_id[uri]) for uri, url in source_urls.items()]
 
             # Credentials are attached per request in _fetch, and only for the
-            # Resolwe origin (see _request_auth).
+            # Resolwe origin (see _request_headers).
             async with self._download_session() as session:
                 futures = [
                     self._download_file(url, session, id_, data_type)

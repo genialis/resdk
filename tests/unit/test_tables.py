@@ -496,31 +496,37 @@ class TestTables(unittest.TestCase):
         self.assertDictEqual(mapping, self.gene_map)
 
 
-class TestRequestAuth(unittest.TestCase):
+class TestRequestHeaders(unittest.TestCase):
     def setUp(self):
         self.tables = MagicMock()
         self.tables.resolwe.url = "https://Genialis.example:443"
-        self.tables.resolwe.auth = MagicMock(token="token", cookies={"a": "b"})
+        self.tables.resolwe.auth = MagicMock(token="token")
 
-    def test_credentials_for_resolwe_host(self):
-        headers, cookies = BaseTables._request_auth(
+    def test_token_for_resolwe_host(self):
+        headers = BaseTables._request_headers(
             self.tables, "https://genialis.example/data/1/file"
         )
         self.assertEqual(headers, {"Authorization": "Bearer token"})
-        self.assertEqual(cookies, {"a": "b"})
 
-    def test_no_credentials_for_other_origins(self):
+    def test_no_token_for_other_origins(self):
         for url in (
             "https://storage.example/signed",
             "http://genialis.example/data/1/file",
             "https://genialis.example:8443/data/1/file",
         ):
-            self.assertEqual(BaseTables._request_auth(self.tables, url), ({}, {}))
+            self.assertEqual(BaseTables._request_headers(self.tables, url), {})
 
-    def test_credentials_for_https_upgrade(self):
+    def test_token_for_https_upgrade(self):
         self.tables.resolwe.url = "http://genialis.example"
-        headers, _ = BaseTables._request_auth(self.tables, "https://genialis.example/f")
+        headers = BaseTables._request_headers(self.tables, "https://genialis.example/f")
         self.assertEqual(headers, {"Authorization": "Bearer token"})
+
+    def test_anonymous_sends_no_header(self):
+        self.tables.resolwe.auth = MagicMock(token=None)
+        headers = BaseTables._request_headers(
+            self.tables, "https://genialis.example/data/1/file"
+        )
+        self.assertEqual(headers, {})
 
 
 class TestTokenRenewalBeforeDownload(unittest.TestCase):
@@ -588,8 +594,8 @@ class TestFetch(unittest.IsolatedAsyncioTestCase):
 
         tables = MagicMock()
         tables.resolwe.url = str(resolwe.make_url("/"))
-        tables.resolwe.auth = MagicMock(token="token", cookies={"sessionid": "s"})
-        tables._request_auth = lambda url: BaseTables._request_auth(tables, url)
+        tables.resolwe.auth = MagicMock(token="token")
+        tables._request_headers = lambda url: BaseTables._request_headers(tables, url)
 
         async with BaseTables._download_session() as session:
             content = await BaseTables._fetch(
@@ -600,7 +606,7 @@ class TestFetch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [path for _, path, _, _ in seen], ["/data/1/file", "/signed", "/final"]
         )
-        self.assertEqual(seen[0][2:], ("sessionid=s", "Bearer token"))
+        self.assertEqual(seen[0][2:], (None, "Bearer token"))
         for _, _, cookie, authorization in seen[1:]:
             self.assertIsNone(cookie)
             self.assertIsNone(authorization)
@@ -615,10 +621,8 @@ class TestFetch(unittest.IsolatedAsyncioTestCase):
 
         tables = MagicMock()
         tables.resolwe.url = str(server.make_url("/"))
-        tables.resolwe.auth = MagicMock(
-            token="secret-token", cookies={"sessionid": "s"}
-        )
-        tables._request_auth = lambda url: BaseTables._request_auth(tables, url)
+        tables.resolwe.auth = MagicMock(token="secret-token")
+        tables._request_headers = lambda url: BaseTables._request_headers(tables, url)
         tables._download_error = BaseTables._download_error
 
         async with BaseTables._download_session() as session:
@@ -629,7 +633,6 @@ class TestFetch(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status, 401)
         self.assertNotIn("secret-token", repr(raised.exception))
-        self.assertNotIn("sessionid", repr(raised.exception))
 
 
 class WideTables(BaseTables):

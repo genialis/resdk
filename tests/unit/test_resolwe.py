@@ -14,6 +14,7 @@ import requests
 from mock import MagicMock, patch
 from slumber.exceptions import SlumberHttpBaseException
 
+from resdk import auth
 from resdk.exceptions import ResolweServerError, ValidationError
 from resdk.resolwe import (
     ResAuth,
@@ -119,10 +120,9 @@ class TestResolwe(unittest.TestCase):
     @patch("resdk.resolwe.Resolwe", spec=Resolwe)
     def test_login(self, resolwe_mock, resauth_mock, resolwe_api_mock):
         resolwe_mock.url = "http://some/url"
-        resauth_mock.cookies = {}
         resolwe_mock.uploader = MagicMock(spec=Uploader)
-        Resolwe._login(resolwe_mock, "a", "b")
-        self.assertEqual(resauth_mock.call_count, 1)
+        Resolwe._login(resolwe_mock, "a.b.c")
+        resauth_mock.assert_called_once_with("http://some/url", token="a.b.c")
         self.assertEqual(resolwe_api_mock.call_count, 1)
 
     def test_repr(self):
@@ -136,38 +136,35 @@ class TestResolwe(unittest.TestCase):
         rep = Resolwe.__repr__(resolwe_mock)
         self.assertEqual(rep, "Resolwe <url: www.abc.com>")
 
-    @patch("resdk.resolwe.auth.sign_in", side_effect=RuntimeError("no Auth0"))
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(Resolwe, "_login_with_password")
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.ResAuth")
     @patch("resdk.resolwe._CredentialSafeSession")
-    def test_env_variables(self, session_mock, resauth_mock, requests_mock, sign_in):
-        # Ensure environmental variables are not set.
-        os.environ.pop("RESOLWE_HOST_URL", None)
-        os.environ.pop("RESOLWE_API_USERNAME", None)
-        os.environ.pop("RESOLWE_API_PASSWORD", None)
-
-        # Default URL should be used by default.
+    def test_env_variables(
+        self, session_mock, resauth_mock, requests_mock, password_login
+    ):
+        # Without credentials the connection is anonymous, to the default URL.
         resolwe_api = Resolwe()
         self.assertEqual(resolwe_api.url, "http://localhost:8000")
-        self.assertEqual(resauth_mock.call_args[0][0], None)
-        self.assertEqual(resauth_mock.call_args[0][1], None)
+        resauth_mock.assert_called_once_with("http://localhost:8000", token=None)
+        password_login.assert_not_called()
 
-        # If environment variable is set, it overrides the default URL.
+        # The environment gives the URL and the credentials.
         os.environ["RESOLWE_API_USERNAME"] = "foo"
         os.environ["RESOLWE_API_PASSWORD"] = "bar"
         os.environ["RESOLWE_HOST_URL"] = "http://resolwe-api:8000"
         resolwe_api = Resolwe()
         self.assertEqual(resolwe_api.url, "http://resolwe-api:8000")
-        self.assertEqual(resauth_mock.call_args[0][0], "foo")
-        self.assertEqual(resauth_mock.call_args[0][1], "bar")
+        password_login.assert_called_once_with("foo", "bar")
 
     @patch.dict(os.environ, {"RESDK_TOKEN": "env-token"}, clear=True)
-    @patch("resdk.resolwe.auth.sign_in", side_effect=RuntimeError("no Auth0"))
+    @patch.object(Resolwe, "_login_with_password")
     @patch("resdk.resolwe.requests")
     @patch("resdk.resolwe.ResAuth")
     @patch("resdk.resolwe._CredentialSafeSession")
     def test_env_token_precedence(
-        self, session_mock, resauth_mock, requests_mock, sign_in
+        self, session_mock, resauth_mock, requests_mock, password_login
     ):
         # The environment token is used when there are no credentials, or only
         # a username.
@@ -175,14 +172,18 @@ class TestResolwe(unittest.TestCase):
         self.assertEqual(resauth_mock.call_args.kwargs["token"], "env-token")
         Resolwe(username="foo")
         self.assertEqual(resauth_mock.call_args.kwargs["token"], "env-token")
+        password_login.assert_not_called()
 
         # A username and password pair wins over the environment token.
+        resauth_mock.reset_mock()
         Resolwe(username="foo", password="bar")
-        self.assertIsNone(resauth_mock.call_args.kwargs["token"])
+        password_login.assert_called_once_with("foo", "bar")
+        resauth_mock.assert_not_called()
 
         # An explicit token wins over everything.
         Resolwe(username="foo", password="bar", token="arg-token")
         self.assertEqual(resauth_mock.call_args.kwargs["token"], "arg-token")
+        password_login.assert_called_once()
 
 
 class TestProcessFileField(unittest.TestCase):
@@ -822,7 +823,6 @@ class TestCredentialSafeSession(unittest.TestCase):
             "https://storage.example/signed",
             {
                 "Cookie": "sessionid=secret",
-                "X-CSRFToken": "csrf",
                 "Authorization": "Bearer token",
             },
         )
@@ -830,7 +830,6 @@ class TestCredentialSafeSession(unittest.TestCase):
             redirected, self._response("https://genialis.example/data")
         )
         self.assertNotIn("Cookie", redirected.headers)
-        self.assertNotIn("X-CSRFToken", redirected.headers)
         self.assertNotIn("Authorization", redirected.headers)
 
     def test_keeps_credentials_on_same_host_redirect(self):
@@ -838,13 +837,12 @@ class TestCredentialSafeSession(unittest.TestCase):
         session.credential_origin = ("https", "genialis.example", 443)
         redirected = self._prepare(
             "https://genialis.example/other",
-            {"Cookie": "sessionid=secret", "X-CSRFToken": "csrf"},
+            {"Cookie": "sessionid=secret"},
         )
         session.rebuild_auth(
             redirected, self._response("https://genialis.example/data")
         )
         self.assertEqual(redirected.headers["Cookie"], "sessionid=secret")
-        self.assertEqual(redirected.headers["X-CSRFToken"], "csrf")
 
     def test_strips_credentials_on_same_host_port_change_or_downgrade(self):
         session = _CredentialSafeSession()
@@ -853,14 +851,11 @@ class TestCredentialSafeSession(unittest.TestCase):
             "https://genialis.example:8443/other",
             "http://genialis.example/other",
         ):
-            redirected = self._prepare(
-                target, {"Cookie": "sessionid=secret", "X-CSRFToken": "csrf"}
-            )
+            redirected = self._prepare(target, {"Cookie": "sessionid=secret"})
             session.rebuild_auth(
                 redirected, self._response("https://genialis.example/data")
             )
             self.assertNotIn("Cookie", redirected.headers)
-            self.assertNotIn("X-CSRFToken", redirected.headers)
 
     def _follow(self, chain):
         """Request chain[0] with credentials; each URL redirects to the next."""
@@ -889,7 +884,7 @@ class TestCredentialSafeSession(unittest.TestCase):
         session.mount("http://", FakeAdapter())
         session.mount("https://", FakeAdapter())
         session.cookies.set("sessionid", "secret")
-        session.get(chain[0], headers={"X-CSRFToken": "csrf"})
+        session.get(chain[0])
         self.assertEqual([request.url for request in sent], chain)
         self.assertIn("sessionid=secret", sent[0].headers["Cookie"])
         return sent
@@ -898,13 +893,12 @@ class TestCredentialSafeSession(unittest.TestCase):
         session = _CredentialSafeSession()
         redirected = self._prepare(
             "https://genialis.example/other",
-            {"Cookie": "sessionid=secret", "X-CSRFToken": "csrf"},
+            {"Cookie": "sessionid=secret"},
         )
         session.rebuild_auth(
             redirected, self._response("https://genialis.example/data")
         )
         self.assertNotIn("Cookie", redirected.headers)
-        self.assertNotIn("X-CSRFToken", redirected.headers)
 
     def test_strips_credentials_on_every_hop_of_a_redirect_chain(self):
         """Cookies are re-added on each hop, so every later hop must strip them."""
@@ -929,14 +923,12 @@ class TestCredentialSafeSession(unittest.TestCase):
             with self.subTest(chain=chain):
                 for request in self._follow(chain)[1:]:
                     self.assertNotIn("Cookie", request.headers)
-                    self.assertNotIn("X-CSRFToken", request.headers)
 
     def test_keeps_credentials_on_https_upgrade(self):
         sent = self._follow(
             ["http://genialis.example/data", "https://genialis.example/data"]
         )
         self.assertIn("sessionid=secret", sent[1].headers["Cookie"])
-        self.assertEqual(sent[1].headers["X-CSRFToken"], "csrf")
 
 
 class TestUrlOrigin(unittest.TestCase):
@@ -957,141 +949,21 @@ class TestUrlOrigin(unittest.TestCase):
 
 
 class TestResAuth(unittest.TestCase):
-    @patch("resdk.resolwe.ResAuth", spec=True)
-    def setUp(self, auth_mock):
-        auth_mock.interactive_login_url = "https://url.com/remote-auth/"
-        auth_mock.automatic_login_url = "http://www.abc.com/saml-auth/api-login/"
-        auth_mock.logger = MagicMock()
-        auth_mock.configure_mock(sessionid=None, csrftoken=None)
-        self.auth_mock = auth_mock
+    def test_anonymous(self):
+        res_auth = ResAuth("https://url.com")
+        self.assertIsNone(res_auth.tokens)
+        self.assertIsNone(res_auth.username)
+        self.assertIsNone(res_auth.token)
 
-    def test_init(self):
-        ResAuth.__init__(self.auth_mock, "uname", "pw", "https://url.com")
-        self.auth_mock.automatic_login.assert_called_once_with("uname", "pw")
-        self.auth_mock.interactive_login.assert_not_called()
-
-    def test_interactive_fallback_no_username(self):
-        """Only fall back to automatic login if username is not provided."""
-        ResAuth.__init__(
-            self.auth_mock,
-            username="test",
-            password="pass",
-            url="https://url.com",
-            interactive=True,
-        )
-        self.auth_mock.interactive_login.assert_not_called()
-        self.auth_mock.reset_mock()
-
-        # Attempt interactive login only when no username is given.
-        ResAuth.__init__(
-            self.auth_mock, password="pw", url="https://url.com", interactive=True
-        )
-        self.auth_mock.interactive_login.assert_called_once_with()
-
-    @patch("resdk.resolwe.requests")
-    @patch("resdk.resolwe.webbrowser")
-    @patch("resdk.resolwe.print")
-    @patch("resdk.resolwe.time")
-    def test_interactive_login(
-        self, time_mock, print_mock, webbrowser_mock, requests_mock
-    ):
-        requests_mock.get.return_value = MagicMock(
-            status_code=200, **{"json.return_value": {"auth_id": "123"}}
-        )
-        requests_mock.Session.return_value.get.side_effect = [
-            MagicMock(status_code=204),
-            MagicMock(
-                status_code=200,
-                json=MagicMock(
-                    return_value={"csrftoken": "my-token", "sessionid": "my-id"}
-                ),
-            ),
-        ]
-        self.assertDictEqual(
-            ResAuth.interactive_login(self.auth_mock),
-            {"csrftoken": "my-token", "sessionid": "my-id"},
-        )
-        webbrowser_mock.open.assert_called_once_with("https://url.com/remote-auth/")
-        requests_mock.get.assert_called_once_with(
-            "https://url.com/remote-auth/auth-id/"
-        )
-        print_mock.assert_called_once()
-        time_mock.sleep.assert_called_once_with(1)
-        self.assertEqual(requests_mock.Session.return_value.get.call_count, 2)
-        requests_mock.Session.return_value.get.assert_called_with(
-            "https://url.com/remote-auth/poll/"
-        )
-
-    @patch("resdk.resolwe.requests")
-    def test_automatic_login(self, requests_mock):
-        requests_mock.post.return_value = MagicMock(status_code=204)
-        requests_mock.post.return_value.cookies.get_dict.return_value = {
-            "csrftoken": "my-token",
-            "sessionid": "my-id",
-        }
-        cookies = ResAuth.automatic_login(
-            self.auth_mock, username="me", password="pass"
-        )
-        self.auth_mock.logger.info.assert_called_once()
-        self.assertDictEqual(cookies, {"csrftoken": "my-token", "sessionid": "my-id"})
-
-    @patch("resdk.resolwe.requests")
-    def test_automatic_login_error_reports_status_and_body(self, requests_mock):
-        requests_mock.post.return_value = MagicMock(
-            status_code=503,
-            text="<html>\n  <body>\n    Service Temporarily Unavailable\n  </body>\n</html>",
-        )
-        requests_mock.post.return_value.cookies.get_dict.return_value = {}
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"^Automatic login failed: HTTP 503 <html> <body> Service Temporarily "
-            r"Unavailable </body> </html>$",
-        ):
-            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
-
-    @patch("resdk.resolwe.requests")
-    def test_automatic_login_error_truncates_body(self, requests_mock):
-        requests_mock.post.return_value = MagicMock(status_code=502, text="x" * 1000)
-        with self.assertRaisesRegex(
-            RuntimeError, r"^Automatic login failed: HTTP 502 x{200}$"
-        ):
-            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
-
-    @patch("resdk.resolwe.requests")
-    def test_automatic_login_error_without_cookies(self, requests_mock):
-        requests_mock.post.return_value = MagicMock(status_code=200)
-        requests_mock.post.return_value.cookies.get_dict.return_value = {
-            "csrftoken": "my-token"
-        }
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"^Automatic login failed: HTTP 200 without the session cookies\.$",
-        ):
-            ResAuth.automatic_login(self.auth_mock, username="me", password="pass")
+    def test_token_becomes_a_session(self):
+        res_auth = ResAuth("https://url.com", token=" a.b.c\n")
+        self.assertIsInstance(res_auth.tokens, auth.Auth0Session)
+        self.assertEqual(res_auth.token, "a.b.c")
 
     def test_call(self):
-        res_auth = MagicMock(
-            spec=ResAuth,
-            sessionid=None,
-            csrftoken=None,
-            token=None,
-            cookies={},
-            url="www.abc.com",
-        )
+        res_auth = MagicMock(spec=ResAuth, token=None, url="www.abc.com")
         resp = ResAuth.__call__(res_auth, MagicMock(headers={}))
         self.assertDictEqual(resp.headers, {"referer": "www.abc.com"})
-
-        res_auth = MagicMock(
-            spec=ResAuth,
-            token=None,
-            cookies={"csrftoken": "my-token", "sessionid": "my-id"},
-            url="abc.com",
-        )
-        resp = ResAuth.__call__(res_auth, MagicMock(headers={}))
-        self.assertDictEqual(
-            resp.headers,
-            {"X-CSRFToken": "my-token", "referer": "abc.com"},
-        )
 
     def test_call_with_token(self):
         res_auth = MagicMock(spec=ResAuth, token="a.b.c", url="abc.com")
