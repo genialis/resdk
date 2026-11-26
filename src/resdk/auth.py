@@ -18,6 +18,10 @@ The token is kept in memory only (never written to disk) and is sent to the
 Resolwe server as ``Authorization: Bearer <token>`` by
 :class:`resdk.resolwe.ResAuth`.
 
+The Resolwe server names its Auth0 tenant, application and API: ReSDK reads
+them from the server's protected resource metadata (RFC 9728) and the tenant's
+OpenID Connect discovery document (see :meth:`Auth0Settings.discover`).
+
 A token obtained elsewhere can be put in the ``RESDK_TOKEN`` environment
 variable; ReSDK then signs nobody in.
 
@@ -26,7 +30,8 @@ connecting to Resolwe::
 
     from resdk import auth
 
-    session = auth.sign_in()
+    settings = auth.Auth0Settings.discover("https://app.genialis.com")
+    session = auth.sign_in(settings)
     headers = {"Authorization": f"Bearer {session.access_token}"}
 
 .. autofunction:: resdk.auth.sign_in
@@ -56,7 +61,7 @@ import time
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import requests
 
@@ -64,30 +69,13 @@ from .utils import url_origin
 
 #: Environment variable holding a pre-obtained access token.
 TOKEN_ENV_VAR = "RESDK_TOKEN"
-#: Environment variable selecting the Auth0 tenant, a key of :data:`TENANTS`.
-TENANT_ENV_VAR = "RESDK_AUTH0_TENANT"
-DEFAULT_TENANT = "production"
 
-#: The Auth0 tenants: their domain, the client ID of their Native application,
-#: the identifier of their API (the audience of the tokens) and the Resolwe
-#: servers whose users they sign in. The client IDs are public; a Native
-#: application has no secret.
-TENANTS = {
-    # Its application is created when the production tenant is set up; until
-    # then, sign-in reports that it is missing.
-    "production": {
-        "domain": "genialis.us.auth0.com",
-        "client_id": None,
-        "audience": "https://api.genialis.com",
-        "servers": ("app.genialis.com",),
-    },
-    "test": {
-        "domain": "genialis-test.eu.auth0.com",
-        "client_id": "JbYl1IfXfr2MlAqHnr9MR4YBziiCytIh",
-        "audience": "https://api.genialis.io",
-        "servers": ("qa.genialis.io",),
-    },
-}
+#: Path of the protected resource metadata (RFC 9728) on the Resolwe server.
+RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
+#: Path of the OpenID Connect discovery document, relative to the issuer.
+OPENID_CONFIGURATION_PATH = "/.well-known/openid-configuration"
+#: Seconds to wait for a discovery document.
+DISCOVERY_TIMEOUT = 30
 
 #: ``expressions:api`` is the scope the Resolwe server requires, and the
 #: supermodel scopes let the same token score with gpm; Auth0 drops the scopes
@@ -128,56 +116,135 @@ class _CallbackServer(http.server.ThreadingHTTPServer):
 
 @dataclass(frozen=True)
 class Auth0Settings:
-    """Auth0 tenant, client and API audience."""
+    """Auth0 tenant (the issuer and its endpoints), client and API audience."""
 
-    domain: str
+    issuer: str
+    #: Client ID of the tenant's Native application for ReSDK. It is public; a
+    #: Native application has no secret.
     client_id: str
+    #: Identifier of the API the tokens are for.
     audience: str
+    token_endpoint: str
+    authorization_endpoint: str
+    device_authorization_endpoint: str
     scope: str = DEFAULT_SCOPE
-    #: Hosts of the Resolwe servers whose users this tenant signs in.
-    servers: Tuple[str, ...] = ()
-
-    def serves(self, url: str) -> bool:
-        """Return whether ``url`` is one of this tenant's servers, over HTTPS."""
-        return url_origin(url) in {
-            url_origin(f"https://{host}") for host in self.servers
-        }
 
     @classmethod
-    def for_tenant(cls, name: str = DEFAULT_TENANT) -> "Auth0Settings":
-        """Build the settings of a tenant in :data:`TENANTS`.
+    def discover(cls, server_url: str) -> "Auth0Settings":
+        """Return the Auth0 settings that the Resolwe server at ``server_url`` names.
 
-        :raises ValueError: if the tenant is unknown or has no application yet.
+        The server's protected resource metadata (RFC 9728) names its
+        authorization server (the Auth0 issuer), the client ID and the
+        audience. The issuer's OpenID Connect discovery document gives the
+        endpoints. The issuer must match on both sides and the endpoints must
+        be on the issuer's origin, so credentials go only to the tenant that
+        the server names.
+
+        :raises ValueError: if ``server_url`` is not HTTPS.
+        :raises RuntimeError: if a document cannot be read or fails a check.
         """
-        if name not in TENANTS:
+        scheme, host, port = url_origin(server_url)
+        if scheme != "https" or not host:
             raise ValueError(
-                f"Unknown Auth0 tenant {name!r}; {TENANT_ENV_VAR} must be one of "
-                f"{', '.join(sorted(TENANTS))}."
+                f"Signing in through Auth0 needs an HTTPS server URL, not {server_url}."
             )
-        tenant = TENANTS[name]
-        if not tenant["client_id"]:
-            raise ValueError(
-                f"Signing in to the {name!r} Auth0 tenant is not available yet: "
-                "it has no application for ReSDK. Put an access token in "
+        resource = f"https://{host}" if port == 443 else f"https://{host}:{port}"
+        metadata = _discovery_document(
+            resource + RESOURCE_METADATA_PATH,
+            "protected resource metadata",
+            # A web front end may answer the missing path with its index page.
+            absent=(
+                "The server may not support Auth0 sign-in yet; set "
                 f"{TOKEN_ENV_VAR} instead."
+            ),
+        )
+        if metadata.get("resource") != resource:
+            raise RuntimeError(
+                f"The protected resource metadata of {resource} is for "
+                f"{metadata.get('resource')!r}."
             )
+        issuers = metadata.get("authorization_servers")
+        if (
+            not isinstance(issuers, list)
+            or len(issuers) != 1
+            or not _is_https(issuers[0])
+        ):
+            raise RuntimeError(
+                f"The protected resource metadata of {resource} must name exactly "
+                f"one HTTPS authorization server, not {issuers!r}."
+            )
+        issuer = issuers[0]
+        for field in ("client_id", "audience"):
+            if not isinstance(metadata.get(field), str) or not metadata[field]:
+                raise RuntimeError(
+                    f"The protected resource metadata of {resource} has no {field}."
+                )
+
+        configuration = _discovery_document(
+            issuer.rstrip("/") + OPENID_CONFIGURATION_PATH, "OpenID configuration"
+        )
+        if configuration.get("issuer") != issuer:
+            raise RuntimeError(
+                f"The OpenID configuration of {issuer} names the issuer "
+                f"{configuration.get('issuer')!r}."
+            )
+        endpoints = {}
+        for field in (
+            "token_endpoint",
+            "authorization_endpoint",
+            "device_authorization_endpoint",
+        ):
+            endpoint = configuration.get(field)
+            if not _is_https(endpoint) or url_origin(endpoint) != url_origin(issuer):
+                raise RuntimeError(
+                    f"The {field} of {issuer} must be on its origin, not {endpoint!r}."
+                )
+            endpoints[field] = endpoint
         return cls(
-            domain=tenant["domain"],
-            client_id=tenant["client_id"],
-            audience=tenant["audience"],
-            servers=tuple(tenant["servers"]),
+            issuer=issuer,
+            client_id=metadata["client_id"],
+            audience=metadata["audience"],
+            **endpoints,
         )
 
-    @classmethod
-    def from_env(cls) -> "Auth0Settings":
-        """Build the settings of the tenant named in :data:`TENANT_ENV_VAR`.
 
-        The production tenant is used when the variable is unset or blank.
+def _is_https(url: object) -> bool:
+    """Return whether ``url`` is an HTTPS URL with a host."""
+    if not isinstance(url, str):
+        return False
+    try:
+        scheme, host, _ = url_origin(url)
+    except ValueError:
+        # An invalid port.
+        return False
+    return scheme == "https" and bool(host)
 
-        :raises ValueError: if the tenant is unknown or has no application yet.
-        """
-        name = os.environ.get(TENANT_ENV_VAR, "").strip() or DEFAULT_TENANT
-        return cls.for_tenant(name)
+
+def _discovery_document(url: str, name: str, absent: str = "") -> dict:
+    """Return the JSON object at ``url``, a discovery document called ``name``.
+
+    Redirects are not followed: the document must come from the URL itself.
+
+    :param absent: Sentence appended to the error when the server answers
+        without the document: with a status other than 200, or not with JSON.
+    :raises RuntimeError: if the document cannot be read or is not an object.
+    """
+    try:
+        response = requests.get(url, timeout=DISCOVERY_TIMEOUT, allow_redirects=False)
+    except requests.RequestException as error:
+        raise RuntimeError(f"Cannot read the {name} at {url}: {error}") from error
+    suffix = f" {absent}" if absent else ""
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Cannot read the {name} at {url}: HTTP {response.status_code}.{suffix}"
+        )
+    try:
+        document = response.json()
+    except ValueError as error:
+        raise RuntimeError(f"The {name} at {url} is not JSON.{suffix}") from error
+    if not isinstance(document, dict):
+        raise RuntimeError(f"The {name} at {url} is not a JSON object.")
+    return document
 
 
 def token_from_env() -> Optional[str]:
@@ -318,14 +385,13 @@ class Auth0Session:
     def _refresh(self) -> None:
         """Trade the refresh token for a new pair; the caller holds the lock."""
         assert self.settings is not None and self._refresh_token is not None
-        response = requests.post(
-            f"https://{self.settings.domain}/oauth/token",
-            data={
+        response = _post_to_auth0(
+            self.settings.token_endpoint,
+            {
                 "grant_type": "refresh_token",
                 "client_id": self.settings.client_id,
                 "refresh_token": self._refresh_token,
             },
-            timeout=30,
         )
         if not response.ok:
             try:
@@ -372,6 +438,24 @@ def _claims(token: str) -> dict:
     return claims if isinstance(claims, dict) else {}
 
 
+def _post_to_auth0(url: str, data: dict) -> requests.Response:
+    """POST the form ``data`` to the Auth0 endpoint ``url``; return the response.
+
+    Redirects are not followed: on a 307 or 308, requests would resend the
+    form, with its password, code or refresh token, to whatever host the
+    redirect names, past the origin check of :meth:`Auth0Settings.discover`.
+
+    :raises RuntimeError: if Auth0 answers with a redirect.
+    """
+    response = requests.post(url, data=data, timeout=30, allow_redirects=False)
+    if 300 <= response.status_code < 400:
+        raise RuntimeError(
+            f"Auth0 answered {url} with a redirect (HTTP {response.status_code}); "
+            "ReSDK does not follow redirects of sign-in requests."
+        )
+    return response
+
+
 #: Errors from Auth0's token endpoint after which a refresh token is unusable.
 PERMANENT_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
 
@@ -404,28 +488,41 @@ def sign_in(
     in :data:`TOKEN_ENV_VAR` is used if set, without renewal, or the user
     signs in. Nothing is written to disk, so every new process signs in again.
 
-    :param settings: Auth0 settings; read from :data:`TENANT_ENV_VAR` when
-        omitted.
+    :param settings: Auth0 settings, usually from :meth:`Auth0Settings.discover`;
+        needed unless the token comes from :data:`TOKEN_ENV_VAR`
     :param device: ``True`` to sign in with the Device Authorization Flow,
         ``False`` to use the browser on this machine. By default the device
         flow is used when this machine has no browser to open.
     :param username: the user's email, for the password grant
     :param password: the user's password, for the password grant
+    :raises ValueError: if ``settings`` are needed but not given.
     """
     if username and password:
-        if settings is None:
-            settings = Auth0Settings.from_env()
+        settings = _required(settings)
         body = _password_sign_in(settings, username, password)
         return Auth0Session.from_token_response(body, settings)
     token = token_from_env()
     if token:
         return Auth0Session(token)
-    if settings is None:
-        settings = Auth0Settings.from_env()
+    settings = _required(settings)
     if device is None:
         device = not _browser_available()
     body = _device_sign_in(settings) if device else _browser_sign_in(settings)
     return Auth0Session.from_token_response(body, settings)
+
+
+def _required(settings: Optional[Auth0Settings]) -> Auth0Settings:
+    """Return ``settings``, which signing in needs.
+
+    :raises ValueError: if ``settings`` is ``None``.
+    """
+    if settings is None:
+        raise ValueError(
+            "Signing in needs the Auth0 settings; get them from the Resolwe "
+            "server with Auth0Settings.discover(server_url), or set "
+            f"{TOKEN_ENV_VAR}."
+        )
+    return settings
 
 
 def _password_sign_in(settings: Auth0Settings, username: str, password: str) -> dict:
@@ -435,9 +532,9 @@ def _password_sign_in(settings: Auth0Settings, username: str, password: str) -> 
 
     :raises RuntimeError: if Auth0 refuses the credentials or the grant.
     """
-    response = requests.post(
-        f"https://{settings.domain}/oauth/token",
-        data={
+    response = _post_to_auth0(
+        settings.token_endpoint,
+        {
             "grant_type": "password",
             "username": username,
             "password": password,
@@ -445,7 +542,6 @@ def _password_sign_in(settings: Auth0Settings, username: str, password: str) -> 
             "audience": settings.audience,
             "scope": settings.scope,
         },
-        timeout=30,
     )
     if not response.ok:
         try:
@@ -487,14 +583,13 @@ def _device_sign_in(settings: Auth0Settings) -> dict:
     :raises TimeoutError: if the code expires before the sign-in is approved.
     :raises RuntimeError: if the sign-in is denied or Auth0 refuses it.
     """
-    response = requests.post(
-        f"https://{settings.domain}/oauth/device/code",
-        data={
+    response = _post_to_auth0(
+        settings.device_authorization_endpoint,
+        {
             "client_id": settings.client_id,
             "scope": settings.scope,
             "audience": settings.audience,
         },
-        timeout=30,
     )
     if not response.ok:
         raise RuntimeError(f"Auth0 did not start a sign-in: {response.text[:300]}")
@@ -513,14 +608,13 @@ def _device_sign_in(settings: Auth0Settings) -> dict:
         if time.monotonic() > deadline:
             raise TimeoutError("The sign-in code expired before it was approved.")
         try:
-            response = requests.post(
-                f"https://{settings.domain}/oauth/token",
-                data={
+            response = _post_to_auth0(
+                settings.token_endpoint,
+                {
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "device_code": code["device_code"],
                     "client_id": settings.client_id,
                 },
-                timeout=30,
             )
         except requests.RequestException:
             # A dropped connection: keep polling until the code expires.
@@ -550,7 +644,8 @@ def get_access_token(settings: Optional[Auth0Settings] = None) -> str:
     signs in (see :func:`sign_in`). The token is not renewed; keep an
     :class:`Auth0Session` to have it renewed.
 
-    :param settings: Auth0 settings; read from the environment when omitted.
+    :param settings: Auth0 settings, usually from :meth:`Auth0Settings.discover`;
+        needed unless the token comes from :data:`TOKEN_ENV_VAR`
     """
     return sign_in(settings).access_token
 
@@ -569,17 +664,21 @@ def _browser_sign_in(settings: Auth0Settings) -> dict:
     # Auth0 echoes `state` in the redirect. A callback with any other state
     # did not come from this sign-in and is ignored.
     state = secrets.token_urlsafe(16)
-    authorize_url = f"https://{settings.domain}/authorize?" + urllib.parse.urlencode(
-        {
-            "response_type": "code",
-            "client_id": settings.client_id,
-            "redirect_uri": REDIRECT_URI,
-            "scope": settings.scope,
-            "audience": settings.audience,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "state": state,
-        }
+    authorize_url = (
+        settings.authorization_endpoint
+        + "?"
+        + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": settings.client_id,
+                "redirect_uri": REDIRECT_URI,
+                "scope": settings.scope,
+                "audience": settings.audience,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": state,
+            }
+        )
     )
 
     # Query parameters of the redirect from Auth0, filled in by the handler.
@@ -649,15 +748,14 @@ def _browser_sign_in(settings: Auth0Settings) -> dict:
             f"{callback.get('error_description', '')}"
         )
 
-    response = requests.post(
-        f"https://{settings.domain}/oauth/token",
-        data={
+    response = _post_to_auth0(
+        settings.token_endpoint,
+        {
             "grant_type": "authorization_code",
             "client_id": settings.client_id,
             "code": callback["code"],
             "code_verifier": verifier,
             "redirect_uri": REDIRECT_URI,
         },
-        timeout=30,
     )
     return _token_body(response)

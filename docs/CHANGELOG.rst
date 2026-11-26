@@ -17,20 +17,23 @@ Added
   it on an existing connection
 - Add ``login_with_auth0()``, which signs in through Auth0 in the browser
   (Authorization Code flow with PKCE) or, without a browser, with the Device
-  Authorization Flow. ``RESDK_AUTH0_TENANT`` selects the tenant:
-  ``production`` (default) or ``test``
+  Authorization Flow
+- Discover the Auth0 tenant from the Resolwe server with
+  ``resdk.auth.Auth0Settings.discover()``: the server names its tenant,
+  client ID and audience in its protected resource metadata (RFC 9728), and
+  the endpoints come from the tenant's OpenID configuration
 - Renew Auth0 access tokens in memory with a refresh token, before they
   expire and once after a 401, for up to 7 days
 - Sign in with ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` through
-  Auth0's password grant on the server of the selected tenant
-  (app.genialis.com or qa.genialis.io). Other servers, and servers that do
-  not accept Auth0 tokens yet, use the server's password login. A server that
-  cannot be reached keeps the Auth0 token and does not get the password
+  Auth0's password grant on a server that names its tenant. Other servers,
+  and servers that do not accept Auth0 tokens yet, use the server's password
+  login. A server that cannot be reached keeps the Auth0 token and does not
+  get the password
 - With a bearer token, the username of the connection is the email the token
   names, also when the server cannot be reached.
   ``resdk.auth.Auth0Session.email`` returns it
 - Add ``resdk.auth.sign_in()``, which returns a renewed token for packages
-  that do not connect to Resolwe
+  that do not connect to Resolwe, given the discovered settings
 - Add the ``skip_existing`` argument to the ``download`` methods of ``Data``,
   ``Sample`` and ``Collection`` objects. When set to ``True``, files that are
   already present in the download directory and match the md5 checksum of the

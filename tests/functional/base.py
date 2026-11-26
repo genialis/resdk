@@ -2,9 +2,7 @@
 
 import os
 import unittest
-from typing import Optional
 from unittest.mock import patch
-from urllib.parse import urlparse
 
 from resdk import Resolwe, auth
 
@@ -32,30 +30,6 @@ FILES_PATH = os.path.normpath(
 )
 
 
-def auth0_settings_for_url() -> Optional[auth.Auth0Settings]:
-    """Return the Auth0 tenant given in the environment, serving ``URL``.
-
-    The tenant is given explicitly rather than through ``resdk.auth.TENANTS``,
-    so the tests also run against a deploy whose tenant ReSDK does not ship.
-    ``None`` if the tenant is not fully given or ``URL`` is not HTTPS, which
-    ReSDK requires before it sends a password to Auth0.
-    """
-    values = [
-        os.environ.get(f"RESDK_E2E_AUTH0_{name}", "").strip()
-        for name in ("DOMAIN", "CLIENT_ID", "AUDIENCE")
-    ]
-    if not all(values):
-        return None
-    domain, client_id, audience = values
-    settings = auth.Auth0Settings(
-        domain=domain,
-        client_id=client_id,
-        audience=audience,
-        servers=(urlparse(URL).netloc,),
-    )
-    return settings if settings.serves(URL) else None
-
-
 class BaseResdkFunctionalTest(unittest.TestCase):
     """Base class for functional tests in ReSDK.
 
@@ -77,25 +51,20 @@ class BaseResdkFunctionalTest(unittest.TestCase):
         through the same code path, without contacting Auth0.
         """
         signed_in = _SIGNED_IN.get(email)
-        settings = auth0_settings_for_url()
-        if settings is None:
-            self.fail(
-                f"The functional tests need RESDK_E2E_AUTH0_DOMAIN, "
-                f"RESDK_E2E_AUTH0_CLIENT_ID, RESDK_E2E_AUTH0_AUDIENCE and an "
-                f"HTTPS SERVER_URL; got {URL}."
-            )
-        # The tenant is not in resdk.auth.TENANTS, so hand it to the password
-        # login the way RESDK_AUTH0_TENANT would.
-        with patch.object(auth.Auth0Settings, "from_env", return_value=settings):
-            if signed_in is None:
+        # ReSDK discovers the Auth0 tenant from the server, as it does for
+        # users, so the deploy's discovery metadata is under test too.
+        if signed_in is None:
+            res = Resolwe(email, password, URL)
+        else:
+            with patch.object(auth, "sign_in", return_value=signed_in):
                 res = Resolwe(email, password, URL)
-            else:
-                with patch.object(auth, "sign_in", return_value=signed_in):
-                    res = Resolwe(email, password, URL)
-        # ReSDK falls back to the server's password login when Auth0 or the
-        # server refuses; the tests must run with a bearer token.
+        # ReSDK falls back to the server's password login when discovery, Auth0
+        # or the server refuses; the tests must run with a bearer token.
         if res.auth.tokens is None:
-            self.fail(f"{email} did not sign in with a bearer token.")
+            self.fail(
+                f"{email} did not sign in with a bearer token at {URL}; the "
+                "server must be HTTPS and serve its Auth0 discovery metadata."
+            )
         _SIGNED_IN[email] = res.auth.tokens
         return res
 
