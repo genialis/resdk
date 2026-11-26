@@ -25,10 +25,8 @@ Added
 - Renew Auth0 access tokens in memory with a refresh token, before they
   expire and once after a 401, for up to 7 days
 - Sign in with ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` through
-  Auth0's password grant on a server that names its tenant. Other servers,
-  and servers that do not accept Auth0 tokens yet, use the server's password
-  login. A server that cannot be reached keeps the Auth0 token and does not
-  get the password
+  Auth0's password grant at the tenant the server names. A server that
+  cannot be reached keeps the Auth0 token
 - With a bearer token, the username of the connection is the email the token
   names, also when the server cannot be reached.
   ``resdk.auth.Auth0Session.email`` returns it
@@ -54,12 +52,17 @@ Fixed
   on a data object and inputs a non-existing file or field name
 - Query reads objects in batches in ``QCTables`` to avoid exceeding the URL
   length limit on large collections
-- Report the HTTP status and the start of the response body when the
-  password login fails, so that a server that is not ready yet can be told
-  from rejected credentials
 
 Changed
 -------
+- **Breaking:** authenticate only with Auth0 bearer tokens. ``login()``
+  signs in through Auth0: with a username and password through the password
+  grant, without a username through ``login_with_auth0()``. A username and
+  password for a server that names no Auth0 tenant, or that does not accept
+  the token, raise an error instead of falling back to the server's login.
+  Signing in with a username and password, or through Auth0 without
+  ``RESDK_TOKEN``, needs an HTTPS server URL: with ``http://localhost:8000``,
+  ``RESOLWE_API_USERNAME`` and ``RESOLWE_API_PASSWORD`` raise a ``ValueError``
 - Remove the ``pandas<3.0.0`` requirement. The relation columns of the
   metadata table are filled in a way that works under pandas 3 and no longer
   warns on pandas 2.2 and later, and the percentage columns of the MACS2
@@ -68,9 +71,8 @@ Changed
 - Send credentials only to the Resolwe server's origin (scheme, host and
   port), on every redirect hop. An upgrade from ``http`` on port 80 to
   ``https`` on port 443 of the same host keeps them. File downloads redirect to pre-signed storage URLs, so
-  the bearer token, session cookies and CSRF header no longer reach storage.
-  Table and QC file downloads now also send the bearer token, not only the
-  session cookies
+  the bearer token and cookies no longer reach storage. Table and QC file
+  downloads send the bearer token
 - Change the parsing logic for the one-to-one metadata table
   in ``BaseTables`` class so it does not fail when the table
   index does not reflect the state of samples in the collection
@@ -85,6 +87,14 @@ Changed
   ``general_quantification`` and ``general_qc``, no longer each make a
   separate download pass over the collection
 
+Removed
+-------
+- **Breaking:** remove the server's SAML login: the password login
+  (``saml-auth/api-login/``) and the browser login
+  (``saml-auth/remote-login/``), ``AUTOMATIC_LOGIN_POSTFIX``,
+  ``INTERACTIVE_LOGIN_POSTFIX``, the session cookies and CSRF header, and the
+  ``username``, ``password`` and ``interactive`` arguments and ``cookies``
+  attribute of ``ResAuth``
 
 ===================
 22.2.3 - 2026-02-18

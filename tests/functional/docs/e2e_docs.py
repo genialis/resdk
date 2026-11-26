@@ -2,7 +2,6 @@ import os
 import shutil
 import sys
 import tempfile
-from unittest.mock import patch
 
 from resdk import Resolwe
 
@@ -67,8 +66,7 @@ class BaseResdkDocsFunctionalTest(BaseResdkFunctionalTest):
             for line_index, line_content in replace_lines:
                 content[line_index] = line_content
 
-        with patch("resdk.resolwe.AUTOMATIC_LOGIN_POSTFIX", "rest-auth/login/"):
-            exec("".join(content))
+        exec("".join(content))
 
     def upload_reads(self, res):
         reads = res.run(

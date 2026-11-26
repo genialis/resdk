@@ -58,13 +58,6 @@ class BaseResdkFunctionalTest(unittest.TestCase):
         else:
             with patch.object(auth, "sign_in", return_value=signed_in):
                 res = Resolwe(email, password, URL)
-        # ReSDK falls back to the server's password login when discovery, Auth0
-        # or the server refuses; the tests must run with a bearer token.
-        if res.auth.tokens is None:
-            self.fail(
-                f"{email} did not sign in with a bearer token at {URL}; the "
-                "server must be HTTPS and serve its Auth0 discovery metadata."
-            )
         _SIGNED_IN[email] = res.auth.tokens
         return res
 

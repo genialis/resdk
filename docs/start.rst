@@ -51,20 +51,18 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
   If you omit the ``login()`` line you will be logged as anonymous user.
   Note that anonymous users do not have access to the ful set of features.
 
-  The ``login()`` call will perform interactive login in a web browser. If you
-  wish to log in as a different user, open the link in an incognito window.
+  The ``login()`` call signs you in through Auth0, as
+  ``res.login_with_auth0()`` does. With a browser on this machine, Auth0 opens
+  in it. Without one, for example over SSH or on a remote Jupyter server,
+  ReSDK prints an address and a short code: open the address on any
+  device, check that it shows the same code, and approve the sign-in. Approve
+  only codes that your own program printed. Pass ``device=True`` or
+  ``device=False`` to ``login_with_auth0()`` to choose the method yourself.
+  ``res.login(email)`` asks for your password and signs in with it instead.
 
 .. note::
 
-  You can also authenticate with an Auth0 access token instead of a session.
-  Call ``res.login_with_auth0()`` to sign in. With a browser on this machine,
-  Auth0 opens in it. Without one, for example over SSH or on a remote Jupyter
-  server, ReSDK prints an address and a short code: open the address on any
-  device, check that it shows the same code, and approve the sign-in. Approve
-  only codes that your own program printed. Pass ``device=True`` or
-  ``device=False`` to choose the method yourself.
-
-  The access token lasts 10 minutes and ReSDK renews it in memory for up to
+  ReSDK authenticates only with Auth0 access tokens. The access token lasts 10 minutes and ReSDK renews it in memory for up to
   7 days. Nothing is written to disk, so every new Python process signs in
   again.
 
@@ -73,12 +71,17 @@ recognize the interpreter by '>>>'. Now we can connect to the Genialis Server:
   and ReSDK reads the tenant's endpoints from its OpenID configuration.
 
   Scripts and CI jobs can keep using ``RESOLWE_API_USERNAME`` and
-  ``RESOLWE_API_PASSWORD``. On a server that names its tenant, ReSDK sends
-  them to Auth0 and renews the tokens it gets back. This works for accounts
-  with an Auth0 password and without MFA. On any other server, and on a server
-  that does not accept Auth0 tokens yet, ReSDK uses the server's own password
-  login. If the server cannot be reached, ReSDK keeps the Auth0 token and does
-  not send the password to the server.
+  ``RESOLWE_API_PASSWORD``. ReSDK sends them to the Auth0 tenant the server
+  names, never to the server itself, and renews the tokens it gets back. This
+  works for accounts with an Auth0 password and without MFA. On a server that
+  names no tenant, or that does not accept the token, signing in fails. If the
+  server cannot be reached, ReSDK keeps the Auth0 token.
+
+  The server URL you give ReSDK is what you trust. ReSDK checks that the
+  server's metadata and the tenant's OpenID configuration agree, not that the
+  tenant is Genialis's, so these checks do not protect against phishing: a
+  lookalike or compromised server can name its own sign-in service and
+  receive your password or token. Use only server URLs you know.
 
   A token you already have can be passed as ``resdk.Resolwe(url=...,
   token=...)``, set with ``res.login_with_token(token)``, or put in the
